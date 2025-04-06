@@ -1,10 +1,10 @@
-# database.py
-import psycopg2
-import psycopg2.pool
+# database_utils/db_utils.py
+import asyncpg
 import os
+import re # Import regular expression module
 from dotenv import load_dotenv
 import logging
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
 
 # Configurar logging básico
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -12,194 +12,211 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # Cargar variables de entorno
 load_dotenv(encoding='utf-8')
 
-# --- Configuración del Pool de Conexiones ---
-# Usar un pool es más eficiente que abrir/cerrar conexiones constantemente
-try:
-    DB_NAME = os.getenv("DB_NAME")
-    DB_USER = os.getenv("DB_USER")
-    DB_PASS = os.getenv("DB_PASS")
-    DB_HOST = os.getenv("DB_HOST")
-    DB_PORT = os.getenv("DB_PORT")
-    db_pool = psycopg2.pool.SimpleConnectionPool(
-        minconn=1,
-        maxconn=5,  # Ajusta según la concurrencia esperada (para scripts secuenciales, bajo es suficiente)
-        dbname=DB_NAME,
-        user=DB_USER,
-        password=DB_PASS,
-        host=DB_HOST,
-        port=DB_PORT,
-        client_encoding='UTF8'
-    )
-    logging.info("Pool de conexiones a la base de datos inicializado.")
-except (Exception, psycopg2.DatabaseError) as error:
-    logging.error(f"Error al inicializar el pool de conexiones: {error}")
-    db_pool = None # Marcar como no disponible
+# --- Configuración del Pool de Conexiones Asíncrono ---
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASSWORD") # Asegúrate que .env use DB_PASSWORD
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
 
-def get_connection():
-    """Obtiene una conexión del pool."""
+# Variable global para el pool
+db_pool: Optional[asyncpg.Pool] = None
+
+async def init_db_pool():
+    """Inicializa el pool de conexiones asyncpg."""
+    global db_pool
+    if db_pool:
+        logging.info("El pool de conexiones ya está inicializado.")
+        return db_pool
+
+    try:
+        db_pool = await asyncpg.create_pool(
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS,
+            host=DB_HOST,
+            port=DB_PORT,
+            min_size=1,
+            max_size=5, # Ajusta según la concurrencia esperada
+            command_timeout=60 # Timeout para comandos
+        )
+        logging.info("Pool de conexiones asyncpg inicializado.")
+        return db_pool
+    except (Exception, asyncpg.PostgresError) as error:
+        logging.error(f"Error al inicializar el pool de conexiones asyncpg: {error}")
+        db_pool = None
+        raise # Relanzar para que el main sepa que falló
+
+async def close_db_pool():
+    """Cierra el pool de conexiones asyncpg."""
+    global db_pool
     if db_pool:
         try:
-            return db_pool.getconn()
+            await db_pool.close()
+            logging.info("Pool de conexiones asyncpg cerrado.")
+            db_pool = None
         except Exception as e:
-            logging.error(f"Error al obtener conexión del pool: {e}")
-            return None
+            logging.error(f"Error cerrando el pool de conexiones asyncpg: {e}")
     else:
+        logging.info("El pool de conexiones asyncpg no estaba inicializado o ya fue cerrado.")
+
+async def execute_query(sql: str, params: Optional[Tuple] = None, fetch: bool = False, many: bool = False) -> Optional[Union[List[asyncpg.Record], asyncpg.Record, str]]:
+    """
+    Ejecuta una consulta SQL de forma asíncrona usando el pool.
+
+    Args:
+        sql (str): La consulta SQL parametrizada (usando $1, $2...).
+        params (tuple, optional): Tupla de parámetros para la consulta. Defaults to None.
+        fetch (bool): Si True, devuelve resultados. Defaults to False.
+        many (bool): Si True y fetch=True, devuelve todos los resultados (fetch). Si False, devuelve uno (fetchrow).
+
+    Returns:
+        Optional[Union[List[asyncpg.Record], asyncpg.Record, str]]:
+            - List[Record] si fetch=True y many=True.
+            - Record si fetch=True y many=False.
+            - str con estado (e.g., 'INSERT 0 1') si fetch=False y la consulta es INSERT/UPDATE/DELETE.
+            - None en caso de error o si no hay pool.
+    """
+    if not db_pool:
         logging.error("El pool de conexiones no está disponible.")
         return None
 
-def release_connection(conn):
-    """Devuelve una conexión al pool."""
-    if db_pool and conn:
-        try:
-            db_pool.putconn(conn)
-        except Exception as e:
-            logging.error(f"Error al devolver conexión al pool: {e}")
+    # Convert %s placeholders to $1, $2, ... using re.sub
+    count = 0
+    def repl(match):
+        nonlocal count
+        count += 1
+        return f"${count}"
+    sql = re.sub(r'%s', repl, sql)
 
-def execute_query(sql: str, params: Optional[Tuple] = None, fetch: bool = False, many: bool = False):
+    async with db_pool.acquire() as connection:
+        try:
+            if fetch:
+                if many:
+                    result = await connection.fetch(sql, *params if params else [])
+                    logging.debug(f"Ejecutada SQL (fetch many): {sql[:100]}... con params: {params}")
+                    return result
+                else:
+                    result = await connection.fetchrow(sql, *params if params else [])
+                    logging.debug(f"Ejecutada SQL (fetch row): {sql[:100]}... con params: {params}")
+                    return result
+            else:
+                # Para INSERT/UPDATE/DELETE, execute devuelve el estado (e.g., 'INSERT 0 1')
+                status = await connection.execute(sql, *params if params else [])
+                logging.debug(f"Ejecutada SQL (execute): {sql[:100]}... con params: {params} -> Status: {status}")
+                return status # Devuelve el estado de la operación
+
+        except (asyncpg.PostgresError, OSError) as error: # OSError puede ocurrir si la conexión se pierde
+            logging.error(f"Error ejecutando SQL: {sql[:100]}... Error: {error}")
+            # No necesitamos rollback explícito con `async with connection.transaction():`
+            # pero aquí no estamos usando una transacción explícita por simplicidad.
+            # asyncpg maneja implícitamente transacciones por comando si no se especifica.
+            return None
+        except Exception as e:
+             logging.error(f"Error inesperado ejecutando SQL: {sql[:100]}... Error: {type(e).__name__} - {e}")
+             return None
+
+
+async def execute_many(sql: str, data_list: List[Tuple]):
     """
-    Ejecuta una consulta SQL de forma segura usando el pool.
-    Maneja la conexión y el cursor automáticamente.
+    Ejecuta una consulta SQL para múltiples filas de datos (INSERT/UPDATE) de forma asíncrona.
 
     Args:
-        sql (str): La consulta SQL parametrizada (usando %s).
-        params (tuple, optional): Tupla de parámetros para la consulta. Defaults to None.
-        fetch (bool): Si True, devuelve resultados (uno o todos según 'many'). Defaults to False.
-        many (bool): Si True y fetch=True, devuelve todos los resultados (fetchall). Si False, devuelve uno (fetchone).
+        sql (str): La consulta SQL parametrizada (usando $1, $2...).
+        data_list (List[Tuple]): Lista de tuplas, cada tupla son los parámetros para una fila.
 
     Returns:
-        Optional[List[Tuple]] or Optional[Tuple] or None: Resultados si fetch=True, None en otro caso o en error.
+        bool: True si la ejecución fue exitosa (incluso si 0 filas afectadas), False en caso de error.
     """
-    conn = None
-    result = None
-    try:
-        conn = get_connection()
-        if conn:
-            # Autocommit=True simplifica para inserciones/actualizaciones individuales,
-            # pero para transacciones más largas, mejor manejar commit/rollback explícitamente.
-            # Para este script, podríamos desactivarlo y hacer commit al final de cada lote/partido.
-            # Vamos a mantenerlo simple por ahora y commitear tras cada operación exitosa implícitamente.
-            # conn.autocommit = True # Opción 1: Simple pero menos control transaccional
-            with conn.cursor() as cursor:
-                cursor.execute(sql, params or ())
-                if fetch:
-                    result = cursor.fetchall() if many else cursor.fetchone()
-            conn.commit() # Opción 2: Commit explícito después de la operación
-            logging.debug(f"Ejecutada SQL: {sql[:100]}... con params: {params}")
-        else:
-            logging.error("No se pudo obtener conexión para ejecutar la consulta.")
-
-    except (Exception, psycopg2.DatabaseError) as error:
-        logging.error(f"Error ejecutando SQL: {sql[:100]}... Error: {error}")
-        if conn:
-            try:
-                conn.rollback() # Revertir en caso de error
-            except Exception as rb_error:
-                 logging.error(f"Error durante rollback: {rb_error}")
-        result = None # Asegurar que no se devuelvan resultados parciales en error
-    finally:
-        if conn:
-            release_connection(conn)
-    return result
-
-def execute_batch(sql: str, data_list: List[Tuple]):
-    """
-    Ejecuta una consulta SQL para múltiples filas de datos (INSERT/UPDATE).
-
-    Args:
-        sql (str): La consulta SQL parametrizada (usando %s).
-        data_list (List[Tuple]): Lista de tuplas, cada tupla son los parámetros para una fila.
-    """
-    conn = None
+    if not db_pool:
+        logging.error("El pool de conexiones no está disponible para execute_many.")
+        return False
     if not data_list:
-        logging.warning("execute_batch llamado con lista de datos vacía.")
-        return False
+        logging.warning("execute_many llamado con lista de datos vacía.")
+        return True # Considerar éxito si no hay nada que hacer
 
-    try:
-        conn = get_connection()
-        if conn:
-            with conn.cursor() as cursor:
-                # psycopg2.extras.execute_batch es más eficiente para lotes grandes
-                # from psycopg2.extras import execute_batch
-                # execute_batch(cursor, sql, data_list) # Usar si es muy grande
+    # Convert %s placeholders to $1, $2, ... using re.sub
+    count = 0
+    def repl(match):
+        nonlocal count
+        count += 1
+        return f"${count}"
+    sql = re.sub(r'%s', repl, sql)
 
-                # Para lotes moderados, executemany está bien
-                cursor.executemany(sql, data_list)
 
-            conn.commit() # Commit después de ejecutar todo el lote
-            logging.info(f"Ejecutado lote SQL ({len(data_list)} filas): {sql[:100]}...")
-            return True
-        else:
-            logging.error("No se pudo obtener conexión para ejecutar lote.")
-            return False
-
-    except (Exception, psycopg2.DatabaseError) as error:
-        logging.error(f"Error ejecutando lote SQL: {sql[:100]}... Error: {error}")
-        if conn:
+    async with db_pool.acquire() as connection:
+        # Usar una transacción explícita para asegurar atomicidad del lote
+        async with connection.transaction():
             try:
-                conn.rollback()
-            except Exception as rb_error:
-                 logging.error(f"Error durante rollback de lote: {rb_error}")
-        return False
-    finally:
-        if conn:
-            release_connection(conn)
+                # executemany es eficiente para lotes
+                await connection.executemany(sql, data_list)
+                logging.info(f"Ejecutado lote SQL ({len(data_list)} filas): {sql[:100]}...")
+                return True
+            except (asyncpg.PostgresError, OSError) as error:
+                logging.error(f"Error ejecutando lote SQL: {sql[:100]}... Error: {error}")
+                # La transacción hará rollback automáticamente al salir del bloque with por error
+                return False
+            except Exception as e:
+                 logging.error(f"Error inesperado ejecutando lote SQL: {sql[:100]}... Error: {type(e).__name__} - {e}")
+                 return False
 
-# --- Funciones específicas de Inserción/Actualización ---
+# --- Funciones específicas de Inserción/Actualización (Adaptadas a async) ---
 
-# Tablas dimensionales (usar ON CONFLICT)
-def upsert_tournament(tournament_id: int, name: str, country: Optional[str]):
+# Nota: Las funciones `upsert_*` ahora son `async` y usan `execute_query` (que es async)
+# Nota 2: Los parámetros deben pasarse como tupla a execute_query
+
+async def upsert_tournament(tournament_id: int, name: str, country: Optional[str]):
     sql = """
         INSERT INTO tournaments (tournament_id, name, country_name)
-        VALUES (%s, %s, %s)
+        VALUES ($1, $2, $3)
         ON CONFLICT (tournament_id) DO NOTHING;
     """
-    execute_query(sql, (tournament_id, name, country))
+    await execute_query(sql, (tournament_id, name, country))
 
-def upsert_season(season_id: int, tournament_id: int, name: str):
+async def upsert_season(season_id: int, tournament_id: int, name: str):
     sql = """
         INSERT INTO seasons (season_id, tournament_id, name)
-        VALUES (%s, %s, %s)
+        VALUES ($1, $2, $3)
         ON CONFLICT (season_id) DO NOTHING;
     """
-    execute_query(sql, (season_id, tournament_id, name))
+    await execute_query(sql, (season_id, tournament_id, name))
 
-def upsert_team(team_id: int, name: str, country: Optional[str]):
+async def upsert_team(team_id: int, name: str, country: Optional[str]):
     sql = """
         INSERT INTO teams (team_id, name, country)
-        VALUES (%s, %s, %s)
+        VALUES ($1, $2, $3)
         ON CONFLICT (team_id) DO UPDATE SET
             name = EXCLUDED.name,
             country = EXCLUDED.country;
-            -- O DO NOTHING si prefieres no actualizar
     """
-    execute_query(sql, (team_id, name, country))
+    await execute_query(sql, (team_id, name, country))
 
-def upsert_player(player_id: int, name: str, height: Optional[int], position: Optional[str], country: Optional[str]):
+async def upsert_player(player_id: int, name: str, height: Optional[int], position: Optional[str], country: Optional[str]):
     sql = """
         INSERT INTO players (player_id, name, height_cm, primary_position, country_name)
-        VALUES (%s, %s, %s, %s, %s)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (player_id) DO UPDATE SET
             name = EXCLUDED.name,
             height_cm = EXCLUDED.height_cm,
             primary_position = EXCLUDED.primary_position,
             country_name = EXCLUDED.country_name;
-            -- O DO NOTHING si prefieres no actualizar
     """
-    execute_query(sql, (player_id, name, height, position, country))
+    await execute_query(sql, (player_id, name, height, position, country))
 
-# Tabla de Partidos (usar ON CONFLICT)
-def upsert_match(match_id: int, season_id: int, round_num: Optional[int], dt_utc: Any,
+async def upsert_match(match_id: int, season_id: int, round_num: Optional[int], round_name: Optional[str], dt_utc: Any,
                  home_id: int, away_id: int, home_score: Optional[int] = None,
                  away_score: Optional[int] = None, ht_home: Optional[int] = None,
                  ht_away: Optional[int] = None):
+    # Asegúrate que dt_utc sea un objeto datetime compatible con asyncpg (datetime.datetime con tzinfo)
     sql = """
-        INSERT INTO matches (match_id, season_id, round_number, match_datetime_utc,
+        INSERT INTO matches (match_id, season_id, round_number, round_name, match_datetime_utc,
                              home_team_id, away_team_id, home_score, away_score,
                              home_score_ht, away_score_ht)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (match_id) DO UPDATE SET
             season_id = EXCLUDED.season_id,
             round_number = EXCLUDED.round_number,
+            round_name = EXCLUDED.round_name,
             match_datetime_utc = EXCLUDED.match_datetime_utc,
             home_team_id = EXCLUDED.home_team_id,
             away_team_id = EXCLUDED.away_team_id,
@@ -207,21 +224,21 @@ def upsert_match(match_id: int, season_id: int, round_num: Optional[int], dt_utc
             away_score = EXCLUDED.away_score,
             home_score_ht = EXCLUDED.home_score_ht,
             away_score_ht = EXCLUDED.away_score_ht;
-            -- O DO NOTHING si solo quieres insertar una vez
     """
-    params = (match_id, season_id, round_num, dt_utc, home_id, away_id,
+    params = (match_id, season_id, round_num, round_name, dt_utc, home_id, away_id,
               home_score, away_score, ht_home, ht_away)
-    execute_query(sql, params)
+    await execute_query(sql, params)
 
-# Funciones para insertar estadísticas (usar batch)
-def insert_player_stats_batch(player_stats_list: List[Tuple]):
+# Funciones para insertar estadísticas (usar execute_many)
+async def insert_player_stats_batch(player_stats_list: List[Tuple]):
     """
-    Inserta un lote de estadísticas de jugadores.
+    Inserta un lote de estadísticas de jugadores de forma asíncrona.
     La tupla debe coincidir con el orden de las columnas en SQL.
     """
     if not player_stats_list: return
 
-    # Asegúrate de que el número de %s coincida con los campos de la tupla
+    # SQL con placeholders $1, $2...
+    # ¡Asegúrate de que el número de placeholders coincida con los campos de la tupla! (47 campos)
     sql = """
         INSERT INTO player_match_stats (
             match_id, player_id, team_id, is_substitute, played_position, jersey_number,
@@ -234,9 +251,9 @@ def insert_player_stats_batch(player_stats_list: List[Tuple]):
             dribbled_past, fouls_committed, fouls_suffered, saves, punches_made, high_claims,
             saves_inside_box, sweeper_keeper_successful, sweeper_keeper_total
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+            $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
+            $41, $42, $43, $44, $45, $46, $47
         )
         ON CONFLICT (match_id, player_id) DO UPDATE SET
             team_id = EXCLUDED.team_id,
@@ -266,19 +283,18 @@ def insert_player_stats_batch(player_stats_list: List[Tuple]):
             saves_inside_box = EXCLUDED.saves_inside_box,
             sweeper_keeper_successful = EXCLUDED.sweeper_keeper_successful,
             sweeper_keeper_total = EXCLUDED.sweeper_keeper_total;
-            -- O DO NOTHING si no quieres actualizar si ya existe
     """
-    execute_batch(sql, player_stats_list)
+    await execute_many(sql, player_stats_list)
 
-def insert_team_stats_batch(team_stats_list: List[Tuple]):
+async def insert_team_stats_batch(team_stats_list: List[Tuple]):
     """
-    Inserta un lote de estadísticas de equipos.
+    Inserta un lote de estadísticas de equipos de forma asíncrona.
     La tupla debe coincidir con el orden de las columnas en SQL.
     """
     if not team_stats_list: return
 
-    # Asegúrate de que el número de %s coincida con los campos de la tupla
-    # Es una consulta larga, ¡verifica el orden con cuidado!
+    # SQL con placeholders $1, $2...
+    # ¡Verifica el orden y número de columnas! (56 columnas)
     sql = """
         INSERT INTO team_match_stats (
             match_id, team_id, is_home_team, period, formation, average_team_rating,
@@ -295,16 +311,15 @@ def insert_team_stats_batch(team_stats_list: List[Tuple]):
             aerial_duels_percentage, dribbles_successful, dribbles_total, dribbles_percentage,
             interceptions, clearances, goal_kicks
         ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+            $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
+            $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56
         )
         ON CONFLICT (match_id, team_id, period) DO UPDATE SET
             formation = EXCLUDED.formation,
             average_team_rating = EXCLUDED.average_team_rating,
             total_team_market_value_eur = EXCLUDED.total_team_market_value_eur,
             possession_percentage = EXCLUDED.possession_percentage,
-            -- ... (actualiza todas las demás columnas igual que en player_stats)...
             big_chances=EXCLUDED.big_chances, total_shots=EXCLUDED.total_shots, saves=EXCLUDED.saves,
             corners=EXCLUDED.corners, fouls=EXCLUDED.fouls, passes_successful=EXCLUDED.passes_successful,
             passes_total=EXCLUDED.passes_total, passes_percentage=EXCLUDED.passes_percentage,
@@ -327,56 +342,52 @@ def insert_team_stats_batch(team_stats_list: List[Tuple]):
             aerial_duels_percentage=EXCLUDED.aerial_duels_percentage, dribbles_successful=EXCLUDED.dribbles_successful,
             dribbles_total=EXCLUDED.dribbles_total, dribbles_percentage=EXCLUDED.dribbles_percentage,
             interceptions=EXCLUDED.interceptions, clearances=EXCLUDED.clearances, goal_kicks=EXCLUDED.goal_kicks;
-            -- O DO NOTHING si no quieres actualizar
     """
-    execute_batch(sql, team_stats_list)
+    await execute_many(sql, team_stats_list)
 
-def update_team_match_aggregates(match_id: int, home_rating: Optional[float], away_rating: Optional[float],
-                                 home_value: Optional[int], away_value: Optional[int]):
-    """Actualiza el rating y valor promedio del equipo en team_match_stats para un partido."""
-    # Actualizar equipo local
-    sql_home = """
-        UPDATE team_match_stats
-        SET average_team_rating = %s,
-            total_team_market_value_eur = %s
-        WHERE match_id = %s AND is_home_team = TRUE AND period = 'ALL';
+async def update_team_match_aggregates(match_id: int, team_id: int, is_home: bool,
+                                     formation: Optional[str], avg_rating: Optional[float],
+                                     total_value: Optional[int]):
     """
-    execute_query(sql_home, (home_rating, home_value, match_id))
+    Actualiza la formación, rating promedio y valor total para un equipo específico
+    en un partido específico para el periodo 'ALL'.
+    """
+    sql = """
+        UPDATE team_match_stats
+        SET formation = $1,
+            average_team_rating = $2,
+            total_team_market_value_eur = $3
+        WHERE match_id = $4 AND team_id = $5 AND period = 'ALL';
+    """
+    # Note: is_home is not strictly needed for the WHERE clause but good for logging/context
+    params = (formation, avg_rating, total_value, match_id, team_id)
+    status = await execute_query(sql, params)
+    logging.debug(f"Updated team aggregates for Match {match_id}, Team {team_id} (Home: {is_home}). Status: {status}")
 
-    # Actualizar equipo visitante
-    sql_away = """
-        UPDATE team_match_stats
-        SET average_team_rating = %s,
-            total_team_market_value_eur = %s
-        WHERE match_id = %s AND is_home_team = FALSE AND period = 'ALL';
-    """
-    execute_query(sql_away, (away_rating, away_value, match_id))
 
 # --- Funciones Adicionales (Ejemplo: Obtener detalles básicos del partido) ---
-def get_basic_match_details(match_id: int) -> Optional[Dict[str, Any]]:
-    """Obtiene IDs de equipos y datetime de un partido."""
+async def get_basic_match_details(match_id: int) -> Optional[Dict[str, Any]]:
+    """Obtiene IDs de equipos y datetime de un partido de forma asíncrona."""
     sql = """
-        SELECT season_id, round_number, match_datetime_utc, home_team_id, away_team_id
+        SELECT season_id, round_number, round_name, match_datetime_utc, home_team_id, away_team_id, home_score, away_score, home_score_ht, away_score_ht
         FROM matches
-        WHERE match_id = %s;
+        WHERE match_id = $1;
     """
-    result = execute_query(sql, (match_id,), fetch=True, many=False)
+    result = await execute_query(sql, (match_id,), fetch=True, many=False)
     if result:
+        # asyncpg.Record se puede acceder por índice o por nombre de columna
         return {
-            "season_id": result[0],
-            "round_number": result[1],
-            "match_datetime_utc": result[2],
-            "home_team_id": result[3],
-            "away_team_id": result[4]
+            "season_id": result['season_id'],
+            "round_number": result['round_number'],
+            "round_name": result['round_name'],
+            "match_datetime_utc": result['match_datetime_utc'],
+            "home_team_id": result['home_team_id'],
+            "away_team_id": result['away_team_id'],
+            "home_score": result['home_score'],
+            "away_score": result['away_score'],
+            "home_score_ht": result['home_score_ht'],
+            "away_score_ht": result['away_score_ht']
         }
     return None
 
-# --- Cierre del Pool ---
-def close_pool():
-    """Cierra todas las conexiones en el pool."""
-    if db_pool:
-        try:
-            db_pool.closeall()
-            logging.info("Pool de conexiones cerrado.")
-        except Exception as e:
-            logging.error(f"Error cerrando el pool de conexiones: {e}")
+

@@ -1,209 +1,202 @@
-# main.py (Original - Guarda en JSON y fusiona)
-import json
-import os
 import asyncio
+import logging
+import random
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+from typing import List, Optional, Tuple, Set
+# Database utilities
+from database_utils.db_utils import (
+    init_db_pool, close_db_pool, get_basic_match_details,
+    update_team_match_aggregates
+)
 
-# Importar las tres funciones principales con sus nombres originales
-from extractors.id_extractor import scrape_round_match_ids
-from extractors.statistics_extractor import extract_statistics_for_match_ids
-from extractors.players_statistics_extractor import extract_player_stats_for_match_ids
+# Extractor functions
+from extractors.id_extractor import scrape_round_match_ids, USER_AGENTS, _BASE_SOFASCORE_URL
+from extractors.statistics_extractor import process_team_stats_for_match
+from extractors.players_statistics_extractor import process_player_stats_for_match
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(module)s - %(message)s')
+
+
+async def setup_browser_context(p, existing_browser: Optional[Browser] = None) -> Tuple[Optional[Browser], Optional[BrowserContext], Optional[Page]]:
+    """Sets up or resets the Playwright browser context."""
+    browser, context, page = None, None, None
+    if existing_browser:
+        logging.info("    Reiniciando contexto del navegador...")
+        try:
+            await existing_browser.close()
+        except Exception as close_err:
+            logging.warning(f"    Advertencia: Error al cerrar el navegador existente: {close_err}")
+
+    try:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            viewport={"width": 1366, "height": 768}
+        )
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+        page = await context.new_page()
+        logging.info(f"    Visitando página principal ({_BASE_SOFASCORE_URL}) para inicializar contexto...")
+        await page.goto(_BASE_SOFASCORE_URL, wait_until="domcontentloaded", timeout=40000) # Increased timeout
+        await asyncio.sleep(random.uniform(1, 3))
+        logging.info("    Contexto del navegador inicializado/reiniciado.")
+        return browser, context, page
+    except Exception as setup_err:
+        logging.error(f"    Error grave durante la configuración/reinicio del navegador: {setup_err}", exc_info=True)
+        if browser: await browser.close() # Attempt cleanup
+        return None, None, None # Indicate failure
+
 
 async def main():
-    NUMERO_DE_RONDAS = 1 # Ajustar según necesidad
-    # Nombres de archivo para los JSON
-    id_data_filename = f"sofascore_ROUND_DATA_LALIGA_20_21_rondas_1_a_{NUMERO_DE_RONDAS}.json"
-    # Archivo temporal para stats de equipo ANTES de fusionar
-    temp_team_stats_filename = f"temp_sofascore_TEAM_STATS_LALIGA_20_21_rondas_1_a_{NUMERO_DE_RONDAS}.json"
-    # Archivo para stats de jugador
-    player_stats_filename = f"sofascore_PLAYER_STATS_LALIGA_20_21_rondas_1_a_{NUMERO_DE_RONDAS}.json"
-    # Archivo FINAL para stats de equipo DESPUÉS de fusionar
-    final_team_stats_filename = f"sofascore_TEAM_STATS_MERGED_LALIGA_20_21_rondas_1_a_{NUMERO_DE_RONDAS}.json"
+    NUMERO_DE_RONDAS = 1 # Define how many rounds to process
 
-
-    output_dir = "extracted_data" # Carpeta para guardar los JSON
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        print(f"Carpeta '{output_dir}' creada.")
-
-    # Rutas completas a los archivos
-    id_data_filepath = os.path.join(output_dir, id_data_filename)
-    temp_team_stats_filepath = os.path.join(output_dir, temp_team_stats_filename)
-    player_stats_filepath = os.path.join(output_dir, player_stats_filename)
-    final_team_stats_filepath = os.path.join(output_dir, final_team_stats_filename)
-
-
-    if not os.path.exists("extractors"): print("Advertencia: Carpeta 'extractors' no encontrada.")
-
-    # --- FASE 1: Obtener Diccionario de IDs por Ronda ---
-    print(f"\n--- Iniciando Fase 1: Obtener IDs ({NUMERO_DE_RONDAS} rondas) ---")
-    round_data_dict = await scrape_round_match_ids(NUMERO_DE_RONDAS)
-
-    if not round_data_dict or not round_data_dict.get("rounds_data"):
-        print("Error: No se pudieron obtener datos de rondas. Terminando.")
-        return
-
-    # Guardar datos de IDs
+    # --- Initialize Database Pool ---
+    pool = None
     try:
-        with open(id_data_filepath, 'w', encoding='utf-8') as f:
-            json.dump(round_data_dict, f, indent=4, ensure_ascii=False)
-        print(f"-> Datos de rondas guardados en: {id_data_filepath}")
-    except Exception as e:
-        print(f"Error crítico al guardar datos de rondas: {e}. Terminando.")
+        pool = await init_db_pool()
+        if not pool:
+            logging.error("Fallo al inicializar DB pool. Saliendo.")
+            return
+    except Exception as db_init_error:
+        logging.error(f"Excepción al inicializar DB pool: {db_init_error}", exc_info=True)
         return
 
-    # --- Preparación: Crear lista plana de IDs ---
-    all_match_ids = sorted(list(set(
-        match_id # Usar match_id directamente
-        for round_name, ids_in_round in round_data_dict.get("rounds_data", {}).items()
-        for match_id in ids_in_round if match_id # Asegurarse que el ID no sea None o vacío
-    )))
+    # --- Phase 1: Get Match IDs and Basic Data ---
+    # This function now also handles inserting tournament, season, team, and match data
+    all_match_ids = []
+    try:
+        print(f"\n--- Iniciando Fase 1: Obtener IDs y Datos Básicos ({NUMERO_DE_RONDAS} rondas) ---")
+        all_match_ids = await scrape_round_match_ids(NUMERO_DE_RONDAS)
+    except Exception as id_err:
+        logging.error(f"Error crítico durante la Fase 1 (Obtención de IDs): {id_err}", exc_info=True)
+        # Decide whether to proceed if some IDs were potentially fetched before error
 
     if not all_match_ids:
-        print("\nNo se encontraron IDs de partidos válidos en los datos de rondas. Terminando.")
+        print("\nNo se obtuvieron IDs de partidos válidos. Terminando.")
+        await close_db_pool()
         return
-    print(f"\nTotal de IDs únicos a procesar: {len(all_match_ids)}")
-    # print(f"IDs: {all_match_ids}") # Descomentar para ver IDs
 
-    # --- FASE 2: Extraer Estadísticas de EQUIPO (/statistics) ---
-    print(f"\n--- Iniciando Fase 2: Extracción de estadísticas de Equipo ---")
-    # Llamar a la función original
-    team_statistics_list = await extract_statistics_for_match_ids(all_match_ids)
+    print(f"\nTotal de IDs únicos a procesar para estadísticas detalladas: {len(all_match_ids)}")
 
-    if not team_statistics_list:
-         print("Advertencia: No se pudieron extraer estadísticas de equipo base. La fusión podría fallar.")
-         # Guardar archivo vacío o con error si se desea
-         try:
-             with open(temp_team_stats_filepath, 'w', encoding='utf-8') as f:
-                 json.dump([], f, indent=4, ensure_ascii=False)
-             print(f"-> Archivo temporal de stats de equipo vacío guardado en: {temp_team_stats_filepath}")
-         except Exception as e: print(f"Error al guardar archivo temporal vacío: {e}")
-         # Podrías decidir terminar aquí si las stats de equipo son cruciales: return
-    else:
-        print(f"-> Se extrajeron estadísticas base de equipo para {len(team_statistics_list)} partidos.")
-        # Guardar temporalmente ANTES de la fusión
-        try:
-            with open(temp_team_stats_filepath, 'w', encoding='utf-8') as f:
-                json.dump(team_statistics_list, f, indent=4, ensure_ascii=False)
-            print(f"-> Estadísticas de equipo TEMPORALES guardadas en: {temp_team_stats_filepath}")
-        except Exception as e:
-            print(f"Error crítico al guardar stats de equipo temporales: {e}. Terminando.")
+    # --- Phase 2 & 3: Process Detailed Stats (Team & Player) per Match ---
+    print(f"\n--- Iniciando Fases 2 & 3: Extracción de estadísticas detalladas (Equipo y Jugador) ---")
+
+    successful_team_stats_count = 0
+    successful_player_stats_count = 0
+    failed_match_ids_detailed = set()
+
+    async with async_playwright() as p:
+        browser, context, page = await setup_browser_context(p)
+        if not page:
+            print("Error FATAL: No se pudo inicializar el navegador Playwright para estadísticas. Terminando.")
+            await close_db_pool()
             return
 
+        for i, match_id in enumerate(all_match_ids):
+            print(f"\nProcesando Partido {i+1}/{len(all_match_ids)} (ID: {match_id})")
+            match_failed = False
+            team_aggregates = None # To store formation, avg_rating, total_value
 
-    # --- FASE 3: Extraer Estadísticas de JUGADOR (/lineups) ---
-    print(f"\n--- Iniciando Fase 3: Extracción de estadísticas de Jugador ---")
-    # Llamar a la función original
-    player_statistics_list = await extract_player_stats_for_match_ids(all_match_ids)
-
-    if player_statistics_list:
-        print(f"-> Se extrajeron alineaciones/estadísticas de jugador para {len(player_statistics_list)} partidos.")
-        # Guardar stats de jugador
-        try:
-            with open(player_stats_filepath, 'w', encoding='utf-8') as f:
-                json.dump(player_statistics_list, f, indent=4, ensure_ascii=False)
-            print(f"-> Estadísticas de jugador guardadas en: {player_stats_filepath}")
-        except Exception as e: print(f"Error al guardar estadísticas de jugador: {e}")
-    else:
-        print("Advertencia: No se pudieron extraer estadísticas de jugador. No se realizará la fusión.")
-        # Si no hay stats de jugador, la fusión no es posible.
-        # Puedes renombrar el archivo temporal a final o simplemente no hacer nada más.
-        try:
-             if os.path.exists(temp_team_stats_filepath):
-                  os.rename(temp_team_stats_filepath, final_team_stats_filepath)
-                  print(f"-> Stats de equipo (sin fusionar) guardadas como finales en: {final_team_stats_filepath}")
-        except Exception as ren_err:
-             print(f"Error renombrando archivo temporal: {ren_err}")
-        return # Terminar si no hay stats de jugador
-
-
-    # --- FASE 4: MERGE Player Info (Rating, Market Value) into Team Stats ---
-    # Solo proceder si tenemos ambas listas
-    if team_statistics_list and player_statistics_list:
-        print(f"\n--- Iniciando Fase 4: Fusionando datos de jugador en estadísticas de equipo ---")
-        merged_count = 0
-        # Crear un lookup para acceso rápido a los datos de jugador por match_id
-        player_stats_lookup = {item['match_id']: item.get('lineup_data', {}) # Usar .get para seguridad
-                               for item in player_statistics_list
-                               if 'match_id' in item and isinstance(item.get('lineup_data'), dict) and 'error' not in item['lineup_data']}
-
-        # Iterar sobre la lista de estadísticas de equipo (la que se guardó temporalmente)
-        for team_stat_item in team_statistics_list:
-            match_id = team_stat_item.get('match_id')
-            # Saltar si falta el ID o si las stats son un error
-            if not match_id or (isinstance(team_stat_item.get('statistics'), dict) and 'error' in team_stat_item['statistics']):
-                continue
-
-            # Buscar los datos de jugador para este partido
-            player_data_for_match = player_stats_lookup.get(match_id)
-
-            if player_data_for_match:
-                # Extraer la info agregada del equipo desde los datos del jugador
-                home_info = player_data_for_match.get('home_team_info', {})
-                away_info = player_data_for_match.get('away_team_info', {})
-
-                # Obtener el diccionario de estadísticas del partido completo ('ALL')
-                # Es importante la estructura devuelta por _parse_statistics_data
-                stats_all_period = team_stat_item.get('statistics', {}).get('ALL', {})
-                if not stats_all_period: # Saltar si no hay periodo 'ALL'
-                     print(f"    Advertencia: No se encontró periodo 'ALL' en stats para Match ID {match_id}.")
-                     continue
-
-                stats_all_home = stats_all_period.get('home', {})
-                stats_all_away = stats_all_period.get('away', {})
-
-                # Añadir los campos fusionados si existen los diccionarios home/away
-                if stats_all_home is not None: # Debe ser un dict, no None
-                    # Usar las claves EXACTAS calculadas en _parse_player_lineup_data
-                    stats_all_home['average_team_rating'] = home_info.get('sofascore_rating_avg')
-                    stats_all_home['total_team_market_value'] = home_info.get('total_market_value_eur')
-                    # Añadir formación si se desea
-                    stats_all_home['formation'] = home_info.get('formation')
-
-
-                if stats_all_away is not None:
-                    stats_all_away['average_team_rating'] = away_info.get('sofascore_rating_avg')
-                    stats_all_away['total_team_market_value'] = away_info.get('total_market_value_eur')
-                    # Añadir formación si se desea
-                    stats_all_away['formation'] = away_info.get('formation')
-
-
-                # No es estrictamente necesario reasignar si modificaste el dict in-place, pero es más seguro
-                # team_stat_item['statistics']['ALL']['home'] = stats_all_home
-                # team_stat_item['statistics']['ALL']['away'] = stats_all_away
-                merged_count += 1
-            else:
-                print(f"    Advertencia: No se encontraron datos de jugador válidos para Match ID {match_id} durante la fusión.")
-
-        print(f"-> Datos fusionados para {merged_count} partidos.")
-
-    else:
-        print("-> No se realizó la fusión: faltan datos de equipo temporales o de jugador.")
-
-
-    # --- FASE 5: Save Final Merged Team Stats ---
-    print(f"\n--- Iniciando Fase 5: Guardando estadísticas de equipo finales (fusionadas) ---")
-    if team_statistics_list: # Guardar la lista modificada (o la original si no hubo fusión)
-        try:
-            with open(final_team_stats_filepath, 'w', encoding='utf-8') as f:
-                # Guardar la lista team_statistics_list que ahora contiene los datos fusionados
-                json.dump(team_statistics_list, f, indent=4, ensure_ascii=False)
-            print(f"-> Estadísticas de equipo FINALES (fusionadas) guardadas en: {final_team_stats_filepath}")
-            # Opcional: borrar el archivo temporal
             try:
-                 if os.path.exists(temp_team_stats_filepath):
-                      os.remove(temp_team_stats_filepath)
-                      print(f"-> Archivo temporal '{temp_team_stats_filepath}' eliminado.")
-            except Exception as del_err:
-                 print(f"Advertencia: No se pudo eliminar el archivo temporal: {del_err}")
-        except Exception as e:
-            print(f"Error al guardar estadísticas de equipo finales: {e}")
-    else:
-        print("-> No hay estadísticas de equipo para guardar como finales.")
+                # Get Home/Away Team IDs for this match
+                match_details = await get_basic_match_details(match_id)
+                if not match_details or 'home_team_id' not in match_details or 'away_team_id' not in match_details:
+                    logging.warning(f"No se pudieron obtener detalles (IDs de equipo) para Match ID {match_id}. Saltando estadísticas detalladas.")
+                    failed_match_ids_detailed.add(match_id)
+                    continue
+
+                home_team_id = match_details['home_team_id']
+                away_team_id = match_details['away_team_id']
+
+                # Process Team Stats
+                team_stats_success = await process_team_stats_for_match(page, match_id, home_team_id, away_team_id)
+                if team_stats_success:
+                    successful_team_stats_count += 1
+                else:
+                    logging.warning(f"Falló el procesamiento de estadísticas de equipo para Match ID {match_id}.")
+                    match_failed = True # Mark as potentially failed, but try player stats
+
+                # Process Player Stats (and get aggregates)
+                player_stats_success, team_aggregates = await process_player_stats_for_match(page, match_id, home_team_id, away_team_id)
+                if player_stats_success:
+                    successful_player_stats_count += 1
+                else:
+                    logging.warning(f"Falló el procesamiento de estadísticas de jugador para Match ID {match_id}.")
+                    match_failed = True # Mark as failed if player stats fail
+
+                # Update Team Aggregates if player stats were processed successfully
+                if player_stats_success and team_aggregates:
+                    try:
+                        # Update Home Team Aggregates
+                        await update_team_match_aggregates(
+                            match_id=match_id, team_id=home_team_id, is_home=True,
+                            formation=team_aggregates['home']['formation'],
+                            avg_rating=team_aggregates['home']['avg_rating'],
+                            total_value=team_aggregates['home']['total_value']
+                        )
+                        # Update Away Team Aggregates
+                        await update_team_match_aggregates(
+                            match_id=match_id, team_id=away_team_id, is_home=False,
+                            formation=team_aggregates['away']['formation'],
+                            avg_rating=team_aggregates['away']['avg_rating'],
+                            total_value=team_aggregates['away']['total_value']
+                        )
+                        logging.info(f"    -> Actualizados agregados (formación, rating, valor) para Match ID {match_id}.")
+                    except Exception as agg_update_err:
+                        logging.error(f"    -> Error actualizando agregados de equipo para Match ID {match_id}: {agg_update_err}", exc_info=True)
+                        # Decide if this error constitutes a full match failure
+                        match_failed = True
 
 
+            except Exception as processing_err:
+                 # Catch potential errors from Playwright (like 403 needing reset) or DB
+                 logging.error(f"Error procesando Match ID {match_id}: {type(processing_err).__name__} - {processing_err}", exc_info=False)
+                 match_failed = True
+
+                 # Check if it's a potential blocking error (e.g., 403)
+                 # This requires inspecting the error or having the functions raise specific exceptions
+                 # For simplicity, we'll try resetting the browser on any exception during processing
+                 logging.warning(f"Error encontrado para Match ID {match_id}. Intentando reiniciar contexto del navegador...")
+                 browser, context, page = await setup_browser_context(p, browser)
+                 if not page:
+                     print("Error FATAL: No se pudo reiniciar el navegador después de un error. Terminando.")
+                     break # Stop processing further matches
+
+            finally:
+                if match_failed:
+                    failed_match_ids_detailed.add(match_id)
+                    print(f"-> Partido {match_id} finalizado con errores.")
+                else:
+                    print(f"-> Partido {match_id} procesado exitosamente.")
+
+        # --- Cleanup Playwright ---
+        if browser:
+            try:
+                await browser.close()
+                logging.info("Navegador Playwright final cerrado.")
+            except Exception as final_close_err:
+                logging.warning(f"Advertencia: Error al cerrar el navegador Playwright final: {final_close_err}")
+
+    # --- Final Summary ---
     print("\n--- Proceso Completo Finalizado ---")
+    total_processed = len(all_match_ids)
+    total_detailed_failures = len(failed_match_ids_detailed)
+    total_detailed_success = total_processed - total_detailed_failures
+
+    print(f"Resumen:")
+    print(f"  - Rondas procesadas para IDs/Datos básicos: {NUMERO_DE_RONDAS}")
+    print(f"  - Total de partidos encontrados inicialmente: {total_processed}")
+    print(f"  - Partidos procesados exitosamente para Stats Detalladas (Equipo y Jugador): {total_detailed_success}")
+    # Note: Counts below might be slightly off if one stat type succeeded but the other failed for a match
+    # print(f"  - Éxito en Stats de Equipo (aprox): {successful_team_stats_count}")
+    # print(f"  - Éxito en Stats de Jugador (aprox): {successful_player_stats_count}")
+    print(f"  - Partidos con errores durante procesamiento detallado: {total_detailed_failures}")
+    if failed_match_ids_detailed:
+        logging.warning(f"IDs de partidos con errores en Fases 2/3: {sorted(list(failed_match_ids_detailed))}")
+
+    # --- Close Database Pool ---
+    await close_db_pool()
 
 if __name__ == "__main__":
-    # Para ejecutar el script asíncrono principal
-    # asyncio.run() es la forma estándar en Python 3.7+
+    # Ensure the event loop runs the main async function
     asyncio.run(main())

@@ -33,6 +33,7 @@ CREATE TABLE matches (
     match_id BIGINT PRIMARY KEY,
     season_id BIGINT NOT NULL REFERENCES seasons(season_id),
     round_number INTEGER NULL,
+    round_name VARCHAR(50),
     match_datetime_utc TIMESTAMPTZ NOT NULL, -- Fecha/Hora crucial
     home_team_id BIGINT NOT NULL REFERENCES teams(team_id),
     away_team_id BIGINT NOT NULL REFERENCES teams(team_id),
@@ -186,3 +187,4 @@ CREATE INDEX idx_team_match_stats_team_match ON team_match_stats(team_id, match_
 CREATE INDEX idx_team_match_stats_team_period ON team_match_stats(team_id, period); -- Para analizar rendimiento por periodo
 
 CREATE INDEX idx_players_name ON players(name); 
+SET client_encoding = 'UTF8';
