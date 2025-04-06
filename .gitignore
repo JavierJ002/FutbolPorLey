@@ -1,6 +1,8 @@
 __pycache__/
 **/__pycache__/
 *.py[cod]
-.\ApiScrapper
+ApiScrapper/
 *.json
 .env
+*.cfg
+extractors/__pycache__/

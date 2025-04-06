@@ -12,9 +12,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
 ]
+_BASE_SOFASCORE_URL = "https://www.sofascore.com/" # Para warm-up
 
-_DEFAULT_TOURNAMENT_ID = 8  # LaLiga
-_DEFAULT_SEASON_ID = 32501  # Temporada 20/21
+_DEFAULT_TOURNAMENT_ID = 8
+_DEFAULT_SEASON_ID = 32501
 
 async def scrape_round_match_ids(num_rounds=1):
     """
@@ -30,13 +31,10 @@ async def scrape_round_match_ids(num_rounds=1):
               Devuelve un diccionario parcialmente lleno o con datos vacíos en caso de error.
     """
     result = {
-        "tournament_name": f"LaLiga (ID: {_DEFAULT_TOURNAMENT_ID})", # Nombre fijo o intentar extraer
-        "season_name": f"2020/2021 (ID: {_DEFAULT_SEASON_ID})", # Nombre fijo o intentar extraer
+        "tournament_name": f"LaLiga (ID: {_DEFAULT_TOURNAMENT_ID})",
+        "season_name": f"2020/2021 (ID: {_DEFAULT_SEASON_ID})",
         "rounds_data": {}
     }
-    # Podríamos intentar extraer los nombres reales si una petición funciona,
-    # pero para simplificar y asegurar que siempre haya algo, usamos los fijos.
-    # fetched_metadata = False
 
     print(f"--- Iniciando scrapeo de IDs con Playwright ---")
     print(f"Procesando Rondas: 1 a {num_rounds}")
@@ -46,12 +44,18 @@ async def scrape_round_match_ids(num_rounds=1):
         context = None
         page = None
 
-        # Función para inicializar/reiniciar el navegador y contexto
+        # --- Función auxiliar para (re)iniciar navegador ---
         async def setup_browser_context(existing_browser=None):
-            nonlocal browser, context, page
+            # Usa nonlocal para modificar las variables del scope externo si es necesario,
+            # pero es más limpio devolverlas
+            nonlocal browser, context, page # O define _browser, _context, _page y devuélvelos
+
             if existing_browser:
                  print("    Reiniciando contexto del navegador...")
-                 await existing_browser.close()
+                 try:
+                     await existing_browser.close()
+                 except Exception as close_err:
+                     print(f"    Advertencia: Error al cerrar el navegador existente: {close_err}")
 
             new_browser = await p.chromium.launch(headless=True)
             new_context = await new_browser.new_context(
@@ -62,16 +66,26 @@ async def scrape_round_match_ids(num_rounds=1):
             new_page = await new_context.new_page()
 
             try:
-                 print("    Visitando página principal para inicializar contexto...")
-                 await new_page.goto("https://www.sofascore.com/", wait_until="domcontentloaded", timeout=30000)
+                 print(f"    Visitando página principal ({_BASE_SOFASCORE_URL}) para inicializar contexto...")
+                 await new_page.goto(_BASE_SOFASCORE_URL, wait_until="domcontentloaded", timeout=30000)
                  await asyncio.sleep(random.uniform(1, 3))
                  print("    Contexto inicializado.")
             except Exception as init_err:
                  print(f"    Advertencia: Falló visita a página principal durante inicialización: {init_err}")
 
-            return new_browser, new_context, new_page
+            # Actualizar las variables nonlocal o devolver las nuevas instancias
+            browser = new_browser
+            context = new_context
+            page = new_page
+            # O return new_browser, new_context, new_page
 
-        browser, context, page = await setup_browser_context()
+        # Inicialización inicial
+        try:
+             await setup_browser_context()
+             # O: browser, context, page = await setup_browser_context()
+        except Exception as initial_setup_err:
+             print(f"Error FATAL: No se pudo inicializar el navegador Playwright: {initial_setup_err}")
+             return result # Devuelve resultado parcial o vacío
 
         # Procesar cada ronda
         for round_num in range(1, num_rounds + 1):
@@ -85,9 +99,7 @@ async def scrape_round_match_ids(num_rounds=1):
 
             match_ids_for_round = []
             try:
-                # Pausa antes de la petición
-                await asyncio.sleep(random.uniform(3, 7))
-
+                await asyncio.sleep(random.uniform(3, 7)) # Pausa
                 # Visitar página de la ronda puede ayudar con el contexto
                 try:
                     print(f"    Visitando página de ronda: {round_page_url}")
@@ -96,13 +108,12 @@ async def scrape_round_match_ids(num_rounds=1):
                 except Exception as round_page_err:
                     print(f"    Advertencia: Falló visita a página de ronda {round_num}: {round_page_err}")
 
-                # Hacer la solicitud a la API
                 print(f"    Realizando fetch a API: {api_url}")
                 response = await page.goto(api_url, wait_until="commit", timeout=30000)
 
                 if response is None:
                      print("   -> Error: page.goto a API devolvió None.")
-                     raise ConnectionError("API request returned None")
+                     raise ConnectionError("API request returned None") # Lanza error para capturar abajo
 
                 if response.status == 200:
                     content = await response.text()
@@ -110,10 +121,9 @@ async def scrape_round_match_ids(num_rounds=1):
 
                     # Extraer IDs de partidos finalizados (status code 100)
                     for event in data.get("events", []):
-                        # Aquí podríamos extraer metadata si no la tuviéramos
-                        # if not fetched_metadata and event.get(...): ...
-
-                        if event.get("status", {}).get("code", 0) == 100:
+                        # Añadir comprobación robusta de existencia de claves
+                        status_info = event.get("status", {})
+                        if isinstance(status_info, dict) and status_info.get("code") == 100:
                             match_id = event.get("id")
                             if match_id:
                                 match_ids_for_round.append(match_id)
@@ -126,20 +136,26 @@ async def scrape_round_match_ids(num_rounds=1):
                     print(f"    -> Error {response.status} obteniendo IDs para Ronda {round_num}.")
                     print(f"       Respuesta: {body[:150]}...")
                     result["rounds_data"][f"Ronda {round_num}"] = [] # Guardar lista vacía en error
+
                     # Si es 403, reiniciar contexto
                     if response.status == 403:
                         print("    -> Error 403 detectado. Reiniciando contexto...")
                         await asyncio.sleep(random.uniform(10, 20))
-                        browser, context, page = await setup_browser_context(browser)
+                        await setup_browser_context(browser) # Pasar navegador actual para cerrar
+                        # O: browser, context, page = await setup_browser_context(browser)
+
 
             except Exception as e:
                 print(f"    -> Error general procesando Ronda {round_num} para IDs: {type(e).__name__} - {e}")
                 result["rounds_data"][f"Ronda {round_num}"] = [] # Guardar lista vacía en error general
-                # Podríamos implementar reinicio de contexto aquí también si el error es grave
 
+        # Cerrar navegador al final
         if browser:
-            await browser.close()
+            try:
+                 await browser.close()
+            except Exception as final_close_err:
+                 print(f"    Advertencia: Error al cerrar el navegador al final: {final_close_err}")
+
 
     print("\n--- Scrapeo de IDs Finalizado ---")
     return result
-

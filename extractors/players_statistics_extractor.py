@@ -4,8 +4,9 @@ import json
 import random
 from playwright.async_api import async_playwright
 import traceback
+from typing import Any, Dict, List, Optional, Union # Added typing
 
-# User agents (debe ser consistente con los otros módulos o importado)
+# USER_AGENTS debe estar definido aquí o importado
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5.1 Safari/605.1.15",
@@ -15,487 +16,285 @@ USER_AGENTS = [
 
 _BASE_SOFASCORE_URL = "https://www.sofascore.com/"
 
-# Mapeo de claves JSON de SofaScore a nombres de estadísticas deseadas
-# Esto ayuda a manejar nombres inconsistentes o complejos en la API
-SOFASCORE_PLAYER_STATS_MAP = {
-    # Información básica (ya está en player_info)
-    'name': 'Name', 'shortName': 'Short Name', 'position': 'Position', 'jerseyNumber': 'Jersey Number', 'height': 'Height',
-    'country': 'Country',
-    'rating': 'Rating',
-    'minutesPlayed': 'Minutes played',
-    'touches': 'Touches',
-    'accuratePass': 'accuratePass', # Parte de 'Accurate passes'
-    'totalPass': 'totalPass',       # Parte de 'Accurate passes'
-    'keyPass': 'Key passes',
-    'goalAssist': 'Assists',
-    'goals': 'Goals',
-    'expectedGoals': 'Expected goals', # Verificar si existe esta clave exacta
-    'totalShoot': 'Shots', # Verificar si es 'totalShoot' o 'totalShots'
-    'onTargetScoringAttempt': 'Shots on target',
-    'dribbleWon': 'dribbleWon', # Parte de 'Dribbles completed'
-    'dribbleAttempt': 'dribbleAttempt', # Parte de 'Dribbles completed'
-    'duelWon': 'duelWon',             # Parte de 'Duels won' / 'Ground duels' / 'Aerial duels'
-    'duelLost': 'duelLost',           # Parte de 'Duels won' / 'Ground duels' / 'Aerial duels'
-    'aerialWon': 'Aerial duels won',
-    'saves': 'Saves',
-    'punches': 'Punches',
-    'keeperSweeperWon': 'keeperSweeperWon',     # Parte de 'Runs out (succ.)'
-    'totalKeeperSweeper': 'totalKeeperSweeper', # Parte de 'Runs out (succ.)'
-    'goodHighClaim': 'High claims',
-    'savedShotsFromInsideTheBox': 'Saves from inside box',
-    'accurateCross': 'accurateCross',     # Parte de 'Crosses (acc.)'
-    'totalCross': 'totalCross',         # Parte de 'Crosses (acc.)'
-    'accurateLongBalls': 'accurateLongBalls', # Parte de 'Long balls (acc.)'
-    'totalLongBalls': 'totalLongBalls',     # Parte de 'Long balls (acc.)'
-    'totalClearance': 'Clearances',
-    'outfielderBlock': 'Blocked shots', # Verificar si es este o 'blockedScoringAttempt'
-    'interceptionWon': 'Interceptions',
-    'totalTackle': 'Total tackles',
-    'challengeLost': 'Dribbled past', # A menudo 'challengeLost' significa que fue regateado
-    'groundDuelWon': 'groundDuelWon', # Ya cubierto por duelWon/Lost?
-    'groundDuelTotal': 'groundDuelTotal',
-    'aerialDuelWon': 'aerialDuelWon', # Ya cubierto por aerialWon/Lost?
-    'aerialDuelTotal': 'aerialDuelTotal',
-    'fouls': 'Fouls',
-    'wasFouled': 'Was fouled',
-    'blockedScoringAttempt': 'Shots blocked', # Podría ser este para 'Shots blocked' por defensores
-    'possessionLostCtrl': 'Possession lost', # No en tu lista, pero útil
+# --- REVISED & COMPLETED MAPPING: Map SofaScore API keys to desired NUMERIC output keys ---
+SOFASCORE_API_TO_NUMERIC_STATS_MAP = {
+    # Core Info
+    'rating': 'rating', # Keep as float/None
+    'minutesPlayed': 'minutes_played',
+    'touches': 'touches',
+
+    # Passing
+    'accuratePass': 'passes_accurate',
+    'totalPass': 'passes_total',
+    'keyPass': 'passes_key',
+    'accurateLongBalls': 'long_balls_accurate',
+    'totalLongBalls': 'long_balls_total',
+    'accurateCross': 'crosses_accurate',
+    'totalCross': 'crosses_total',
+
+    # Attacking / Goal Contribution
+    'goals': 'goals',
+    'ownGoals': 'own_goals', # Added based on first example
+    'goalAssist': 'assists',
+    'totalShoot': 'shots_total',
+    'onTargetScoringAttempt': 'shots_on_target',
+    'shotOffTarget': 'shots_off_target', # Added from second example
+    'blockedScoringAttempt': 'shots_blocked_by_opponent', # Player's own shot blocked by def
+
+    # Dribbling & Possession
+    'dribbleWon': 'dribbles_successful',
+    'dribbleAttempt': 'dribbles_attempts',
+    'possessionLostCtrl': 'possession_lost',
+    'dispossessed': 'dispossessed', # Times player was tackled and lost ball
+
+    # Duels
+    'duelWon': 'duels_won',
+    'duelLost': 'duels_lost',
+    'aerialWon': 'aerials_won',
+    'aerialLost': 'aerials_lost',
+    # Estos pueden no estar directamente, calcular si es necesario
+    'groundDuelWon': 'ground_duels_won', # Si API lo da
+    # 'groundDuelTotal': 'ground_duels_total', # API might provide this directly
+    # 'aerialDuelTotal': 'aerials_total', # API might provide this directly
+    'totalContest': 'contests_total', # Added from second example (less common?)
+    'wonContest': 'contests_won', # Corresponding won contests
+
+    # Defending
+    'totalTackle': 'tackles', # A veces solo viene este total
+    'interceptionWon': 'interceptions',
+    'totalClearance': 'clearances',
+    'outfielderBlock': 'shots_blocked_by_player', # Player blocks an opponent's shot
+    'challengeLost': 'dribbled_past', # Times the player was dribbled past
+
+    # Fouls
+    'fouls': 'fouls_committed',
+    'wasFouled': 'fouls_suffered',
+
+    # Goalkeeping
+    'saves': 'saves',
+    'punches': 'punches_made',
+    'goodHighClaim': 'high_claims',
+    'savedShotsFromInsideTheBox': 'saves_inside_box',
+    'keeperSweeperWon': 'sweeper_keeper_successful',
+    'totalKeeperSweeper': 'sweeper_keeper_total',
+
 }
 
-# Campos deseados y sus valores por defecto
-DEFAULT_PLAYER_STATS = {
-    'proposedMarketValue': 0, 'Rating': 'N/A', 'Minutes played': '0', 'Touches': '0',
-    'Accurate passes': '0/0 (0%)', 'Passes accuracy': '0%', 'Key passes': '0',
-    'Assists': '0', 'Goals': '0', 'Expected goals': '0.00', # Usar float?
-    'Shots': '0', 'Shots on target': '0',
-    'Dribbles completed': '0/0 (0%)', 'Duels won': '0/0 (0%)', 'Aerial duels won': '0/0 (0%)',
-    'Saves': '0', 'Punches': '0', 'Runs out (succ.)': '0/0 (0%)', 'High claims': '0',
-    'Saves from inside box': '0', 'Crosses (acc.)': '0/0 (0%)', 'Long balls (acc.)': '0/0 (0%)',
-    'Clearances': '0', 'Blocked shots': '0', 'Interceptions': '0', 'Total tackles': '0',
-    'Dribbled past': '0', 'Ground duels (won)': '0/0 (0%)', # Calculado
-    # 'Aerial duels (won)': '0/0 (0%)', # Repetido? Usar el de arriba
-    'Fouls': '0', 'Was fouled': '0',
-    # 'Shots blocked': '0', # Repetido? Usar el de arriba
-    'Dribble attempts (succ.)': '0/0 (0%)' # Repetido? Usar Dribbles completed
-}
-# Simplificar la lista a las claves finales deseadas
-FINAL_STATS_KEYS = list(DEFAULT_PLAYER_STATS.keys())
 
-
-def _calculate_percentage(numerator, denominator):
-    """Calcula porcentaje de forma segura, devuelve 0 si el denominador es 0."""
-    if denominator == 0:
-        return 0
+# --- Helper Function for Safe Numeric Conversion ---
+def _safe_to_float(value: Any, default: float = 0.0) -> Optional[float]:
+    """Safely converts a value to float, returning None for errors or None input."""
+    if value is None:
+        return None
     try:
-        return round((numerator / denominator) * 100)
-    except TypeError: # Si alguno no es número
-        return 0
+        # Handle cases like "7.5" or 7.5
+        return float(str(value).replace(',', '.')) # Ensure decimal point is dot
+    except (ValueError, TypeError):
+        return None # Return None for invalid conversions
 
-def _format_stat_with_total_percentage(accurate_key, total_key, player_stats_raw):
-    """Formatea estadísticas como 'Acc/Total (Perc%)'."""
-    accurate = player_stats_raw.get(accurate_key, 0)
-    total = player_stats_raw.get(total_key, 0)
-    # Asegurarse de que sean números
-    try: accurate = int(accurate)
-    except (ValueError, TypeError): accurate = 0
-    try: total = int(total)
-    except (ValueError, TypeError): total = 0
+def _safe_to_int(value: Any, default: int = 0) -> Optional[int]:
+    """Safely converts a value to int, returning None for errors or None input."""
+    if value is None:
+        return None
+    try:
+        # Handle potential floats like 7.0 or "7"
+        return int(float(str(value).replace(',', '.')))
+    except (ValueError, TypeError):
+        return None # Return None for invalid conversions
 
-    percentage = _calculate_percentage(accurate, total)
-    return f"{accurate}/{total} ({percentage}%)"
-
-def _convert_stats_to_numeric(player_data):
+def _process_player_entry(player_entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Convierte las estadísticas de texto a formato numérico.
-    - Convierte fracciones "X/Y (Z%)" a número flotante X/Y
-    - Convierte porcentajes "X%" a número flotante X/100
-    - Mantiene los valores ya numéricos
-    - Ignora valores no convertibles (como 'N/A')
-    
-    Args:
-        player_data (dict): Diccionario con datos de jugador
-    
-    Returns:
-        dict: Diccionario con valores convertidos a numéricos
+    Extracts and processes data for a single player from the lineup entry.
+    Returns a dictionary with player info and NUMERIC stats, or None if basic data is missing.
     """
-    numeric_data = {}
-    
-    for key, value in player_data.items():
-        # Conservar llaves no numéricas sin cambios
-        if key in ['player_id', 'name', 'short_name', 'position', 'jersey_number', 'is_substitute']:
-            numeric_data[key] = value
-            continue
-            
-        # Si es un string vacío o N/A, usar 0
-        if not value or value == 'N/A':
-            numeric_data[key] = 0
-            continue
-        
-        # Convertir strings a numéricos
-        if isinstance(value, str):
-            # Caso 1: "X/Y (Z%)" -> convertir a X/Y como float
-            if '/' in value and '(' in value:
-                try:
-                    numerator = float(value.split('/')[0])
-                    denominator = float(value.split('/')[1].split('(')[0])
-                    if denominator == 0:  # Evitar división por cero
-                        numeric_data[key] = 0
-                    else:
-                        numeric_data[key] = numerator / denominator
-                except (ValueError, IndexError):
-                    numeric_data[key] = 0
-            
-            # Caso 2: "X%" -> convertir a X/100 como float
-            elif value.endswith('%'):
-                try:
-                    numeric_data[key] = float(value.rstrip('%')) / 100
-                except ValueError:
-                    numeric_data[key] = 0
-            
-            # Caso 3: Intentar convertir directamente a float
+    player_info = player_entry.get("player")
+    stats_raw = player_entry.get("statistics")
+
+    if not player_info or not player_info.get("id") or stats_raw is None:
+        print(f"Advertencia: Datos básicos faltantes para entrada de jugador: {player_entry.get('player', {}).get('id')}")
+        return None
+
+    # Basic Player Info
+    player_data = {
+        'player_id': player_info.get("id"),
+        'name': player_info.get("name"),
+        'short_name': player_info.get("shortName"),
+        # Usar posición del lineup primero, luego del perfil si falta
+        'position': player_entry.get("position", player_info.get("position")),
+        'jersey_number': _safe_to_int(player_entry.get("jerseyNumber")),
+        'is_substitute': player_entry.get("substitute", False),
+        'height': _safe_to_int(player_info.get("height")), # Renombrado en BD, pero aquí mantenemos original
+        'country_code': player_info.get("country", {}).get("alpha2"), # Original
+        'country_name': player_info.get("country", {}).get("name"),
+        'market_value_eur': _safe_to_int(player_info.get("proposedMarketValueRaw", {}).get("value")),
+        'stats': {} # Sub-dictionary for statistics
+    }
+
+    # Initialize all potential stats with None for consistency
+    for target_key in SOFASCORE_API_TO_NUMERIC_STATS_MAP.values():
+        player_data['stats'][target_key] = None
+
+    # Populate stats from the API data
+    for api_key, target_key in SOFASCORE_API_TO_NUMERIC_STATS_MAP.items():
+        if api_key in stats_raw:
+            raw_value = stats_raw[api_key]
+            # Handle specific types (float for rating, int for others)
+            if target_key in ['rating']:
+                player_data['stats'][target_key] = _safe_to_float(raw_value)
             else:
-                try:
-                    numeric_data[key] = float(value)
-                except ValueError:
-                    numeric_data[key] = value  # Mantener el valor original si no se puede convertir
-        else:
-            # Ya es un tipo no string (int, float, etc.)
-            numeric_data[key] = value
-            
-    return numeric_data
+                # All other stats are treated as integers
+                player_data['stats'][target_key] = _safe_to_int(raw_value)
+
+    # Calcular ground duels won si no viene directamente
+    if 'duels_won' in player_data['stats'] and 'aerials_won' in player_data['stats'] and \
+       player_data['stats']['duels_won'] is not None and player_data['stats']['aerials_won'] is not None and \
+       'ground_duels_won' not in player_data['stats']: # Solo si no existe ya
+           player_data['stats']['ground_duels_won'] = player_data['stats']['duels_won'] - player_data['stats']['aerials_won']
 
 
+    return player_data
 
-def _parse_player_lineup_data(lineup_data):
+
+# --- REVISED: Main Parsing Function ---
+def _parse_player_lineup_data(lineup_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Parsea la respuesta JSON de la API /lineups para extraer formación,
-    rating de equipo y estadísticas detalladas de jugadores. CORREGIDO para manejar tipos.
+    Parses the JSON response from the /lineups API using the helper function.
+    Returns a structured dictionary with team info and lists of processed player data.
     """
     parsed_data = {
-        "home_team_info": {"formation": None, "sofascore_rating": None, "players": []},
-        "away_team_info": {"formation": None, "sofascore_rating": None, "players": []}
+        "home_team_info": {
+            "formation": None,
+            "sofascore_rating_avg": None, # Clave original
+            "total_market_value_eur": 0, # Clave original
+            "players": []
+        },
+        "away_team_info": {
+            "formation": None,
+            "sofascore_rating_avg": None, # Clave original
+            "total_market_value_eur": 0, # Clave original
+            "players": []
+        }
     }
 
     if not lineup_data or not isinstance(lineup_data, dict):
         print("    Advertencia: Datos de alineación inválidos o vacíos.")
-        return parsed_data # Devuelve estructura vacía
+        return parsed_data
 
-    # Extraer info de equipo local
+    # Process Home Team
     home_data = lineup_data.get("home", {})
     parsed_data["home_team_info"]["formation"] = home_data.get("formation")
     home_player_ratings = []
+    home_total_market_value = 0
 
-    # Extraer info de equipo visitante
+    for player_entry in home_data.get("players", []):
+        processed_player = _process_player_entry(player_entry)
+        if processed_player:
+            parsed_data["home_team_info"]["players"].append(processed_player)
+            # Usar el valor de mercado del jugador procesado
+            market_value = processed_player.get('market_value_eur')
+            if market_value is not None:
+                 home_total_market_value += market_value
+            # Usar el rating del jugador procesado
+            player_rating = processed_player.get('stats', {}).get('rating')
+            if isinstance(player_rating, (int, float)) and player_rating > 0: # Check type and > 0
+                home_player_ratings.append(player_rating)
+        # else:
+            # print(f"Advertencia: Entrada de jugador HOME ignorada: {player_entry.get('player',{}).get('id')}")
+
+
+    # Process Away Team
     away_data = lineup_data.get("away", {})
     parsed_data["away_team_info"]["formation"] = away_data.get("formation")
     away_player_ratings = []
+    away_total_market_value = 0
 
-    # --- Procesar jugadores LOCALES ---
-    for player_entry in home_data.get("players", []):
-        player_info = player_entry.get("player", {})
-        stats_raw = player_entry.get("statistics", {}) # Datos directos de la API para este jugador
-
-        if not stats_raw:
-            continue
-
-        player_stats = DEFAULT_PLAYER_STATS.copy() # Empezar con defaults (que son strings formateados)
-
-        # Extraer datos básicos del jugador
-        player_stats['player_id'] = player_info.get("id")
-        player_stats['name'] = player_info.get("name")
-        player_stats['short_name'] = player_info.get("shortName")
-        player_stats['position'] = player_entry.get("position", player_info.get("position")) # Posición en el partido
-        player_stats['jersey_number'] = player_entry.get("jerseyNumber")
-        player_stats['is_substitute'] = player_entry.get("substitute", False) # Si entró desde el banquillo
-
-        # Extraer market value
-        market_value_raw = player_info.get("proposedMarketValueRaw", {})
-        player_stats['proposedMarketValue'] = market_value_raw.get("value", 0)
-
-        # Mapear estadísticas directas y guardar crudas para cálculos
-        temp_raw_stats = {} # Diccionario temporal para guardar valores numéricos crudos para cálculo
-        for sofascore_key, target_key_or_component in SOFASCORE_PLAYER_STATS_MAP.items():
-            if sofascore_key in stats_raw:
-                raw_value = stats_raw[sofascore_key]
-                # Mapeos directos a las claves finales (formato string por defecto)
-                if target_key_or_component in player_stats:
-                    player_stats[target_key_or_component] = str(raw_value) if raw_value is not None else player_stats[target_key_or_component]
-                # Guardamos el valor crudo en el temporal si es un componente para cálculo posterior
-                if isinstance(target_key_or_component, str) and (
-                    target_key_or_component.endswith('Pass') or
-                    target_key_or_component.endswith('Won') or
-                    target_key_or_component.endswith('Lost') or
-                    target_key_or_component.endswith('Attempt') or
-                    target_key_or_component.endswith('Sweeper') or
-                    target_key_or_component == 'Aerial duels won' # Caso especial para el cálculo
-                ):
-                   temp_raw_stats[target_key_or_component] = raw_value
-
-
-        # Calcular estadísticas compuestas (pases, etc.) - Crean strings formateados
-        player_stats['Accurate passes'] = _format_stat_with_total_percentage('accuratePass', 'totalPass', temp_raw_stats)
-        # Calcular accuracy % numérico para posible uso futuro (no se usa en formato final)
-        acc_pass_num = 0
-        tot_pass_num = 0
-        try: acc_pass_num = int(temp_raw_stats.get('accuratePass', 0))
-        except (ValueError, TypeError): pass
-        try: tot_pass_num = int(temp_raw_stats.get('totalPass', 0))
-        except (ValueError, TypeError): pass
-        player_stats['Passes accuracy'] = f"{_calculate_percentage(acc_pass_num, tot_pass_num)}%"
-
-        player_stats['Dribbles completed'] = _format_stat_with_total_percentage('dribbleWon', 'dribbleAttempt', temp_raw_stats)
-        player_stats['Dribble attempts (succ.)'] = player_stats['Dribbles completed'] # Son lo mismo
-        player_stats['Long balls (acc.)'] = _format_stat_with_total_percentage('accurateLongBalls', 'totalLongBalls', temp_raw_stats)
-        player_stats['Crosses (acc.)'] = _format_stat_with_total_percentage('accurateCross', 'totalCross', temp_raw_stats)
-        player_stats['Runs out (succ.)'] = _format_stat_with_total_percentage('keeperSweeperWon', 'totalKeeperSweeper', temp_raw_stats)
-
-        # --- INICIO BLOQUE DE CÁLCULO DE DUELOS CORREGIDO ---
-        # 1. Obtener valores NUMÉRICOS crudos de stats_raw o temp_raw_stats para CÁLCULOS
-        duel_won_num = 0
-        try: duel_won_num = int(stats_raw.get('duelWon', 0))
-        except (ValueError, TypeError): pass
-
-        duel_lost_num = 0
-        try: duel_lost_num = int(stats_raw.get('duelLost', 0))
-        except (ValueError, TypeError): pass
-
-        aerial_won_num = 0
-        try: aerial_won_num = int(stats_raw.get('aerialWon', 0)) # Usa la clave real de SofaScore
-        except (ValueError, TypeError): pass
-
-        aerial_lost_num = 0
-        try: aerial_lost_num = int(stats_raw.get('aerialLost', 0)) # Verifica que 'aerialLost' exista en la API
-        except (ValueError, TypeError): pass
-
-        ground_won_direct_num = None
-        try:
-             val = stats_raw.get('groundDuelWon')
-             if val is not None: ground_won_direct_num = int(val)
-        except (ValueError, TypeError): pass
-
-        ground_total_direct_num = None
-        try:
-             val = stats_raw.get('groundDuelTotal')
-             if val is not None: ground_total_direct_num = int(val)
-        except (ValueError, TypeError): pass
-
-        # 2. Calcular totales NUMÉRICOS
-        duel_total_num = duel_won_num + duel_lost_num
-        aerial_total_num = aerial_won_num + aerial_lost_num
-
-        # 3. Crear los STRINGS formateados y asignarlos a player_stats
-        player_stats['Duels won'] = f"{duel_won_num}/{duel_total_num} ({_calculate_percentage(duel_won_num, duel_total_num)}%)"
-        player_stats['Aerial duels won'] = f"{aerial_won_num}/{aerial_total_num} ({_calculate_percentage(aerial_won_num, aerial_total_num)}%)"
-
-        # 4. Calcular duelos terrestres y formatear el string
-        if ground_won_direct_num is not None and ground_total_direct_num is not None:
-            player_stats['Ground duels (won)'] = f"{ground_won_direct_num}/{ground_total_direct_num} ({_calculate_percentage(ground_won_direct_num, ground_total_direct_num)}%)"
-        else:
-            # Calcular como fallback usando los números
-            ground_won_calc = duel_won_num - aerial_won_num
-            ground_total_calc = duel_total_num - aerial_total_num # Usa los totales numéricos
-
-            if ground_total_calc >= ground_won_calc and ground_total_calc >= 0: # Sanity check
-                player_stats['Ground duels (won)'] = f"{ground_won_calc}/{ground_total_calc} ({_calculate_percentage(ground_won_calc, ground_total_calc)}%)"
-            else:
-                player_stats['Ground duels (won)'] = f"?/{ground_total_calc} (?%)" # Placeholder si es inconsistente
-        # --- FIN BLOQUE DE CÁLCULO DE DUELOS CORREGIDO ---
-
-
-        # Limpiar claves finales según FINAL_STATS_KEYS y añadir info básica
-        final_player_data = {key: player_stats[key] for key in FINAL_STATS_KEYS if key in player_stats}
-        final_player_data['player_id'] = player_stats.get('player_id')
-        final_player_data['name'] = player_stats.get('name')
-        final_player_data['short_name'] = player_stats.get('short_name')
-        final_player_data['position'] = player_stats.get('position')
-        final_player_data['jersey_number'] = player_stats.get('jersey_number')
-        final_player_data['is_substitute'] = player_stats.get('is_substitute')
-        # Asegurarse que el market value esté, aunque DEFAULT_PLAYER_STATS lo incluye
-        final_player_data['proposedMarketValue'] = player_stats.get('proposedMarketValue', 0)
-
-        # Convertir estadísticas a formato numérico (según la función proporcionada por el usuario)
-        final_player_data = _convert_stats_to_numeric(final_player_data)
-
-        parsed_data["home_team_info"]["players"].append(final_player_data)
-
-        # Añadir rating para el cálculo promedio (intenta convertir desde el formato numérico final)
-        rating_value = final_player_data.get('Rating') # Ya debería ser numérico o 0/None tras _convert_stats_to_numeric
-        if isinstance(rating_value, (int, float)) and rating_value > 0: # Evitar 0 o None/N/A
-             home_player_ratings.append(float(rating_value))
-
-
-    # --- Procesar jugadores VISITANTES (Lógica idéntica) ---
     for player_entry in away_data.get("players", []):
-        player_info = player_entry.get("player", {})
-        stats_raw = player_entry.get("statistics", {})
-        if not stats_raw: continue
-
-        player_stats = DEFAULT_PLAYER_STATS.copy()
-        player_stats['player_id'] = player_info.get("id")
-        player_stats['name'] = player_info.get("name")
-        player_stats['short_name'] = player_info.get("shortName")
-        player_stats['position'] = player_entry.get("position", player_info.get("position"))
-        player_stats['jersey_number'] = player_entry.get("jerseyNumber")
-        player_stats['is_substitute'] = player_entry.get("substitute", False)
-        market_value_raw = player_info.get("proposedMarketValueRaw", {})
-        player_stats['proposedMarketValue'] = market_value_raw.get("value", 0)
-
-        temp_raw_stats = {}
-        for sofascore_key, target_key_or_component in SOFASCORE_PLAYER_STATS_MAP.items():
-            if sofascore_key in stats_raw:
-                raw_value = stats_raw[sofascore_key]
-                if target_key_or_component in player_stats:
-                    player_stats[target_key_or_component] = str(raw_value) if raw_value is not None else player_stats[target_key_or_component]
-                if isinstance(target_key_or_component, str) and (
-                    target_key_or_component.endswith('Pass') or
-                    target_key_or_component.endswith('Won') or
-                    target_key_or_component.endswith('Lost') or
-                    target_key_or_component.endswith('Attempt') or
-                    target_key_or_component.endswith('Sweeper') or
-                    target_key_or_component == 'Aerial duels won'
-                ):
-                   temp_raw_stats[target_key_or_component] = raw_value
-
-        player_stats['Accurate passes'] = _format_stat_with_total_percentage('accuratePass', 'totalPass', temp_raw_stats)
-        acc_pass_num = 0
-        tot_pass_num = 0
-        try: acc_pass_num = int(temp_raw_stats.get('accuratePass', 0))
-        except (ValueError, TypeError): pass
-        try: tot_pass_num = int(temp_raw_stats.get('totalPass', 0))
-        except (ValueError, TypeError): pass
-        player_stats['Passes accuracy'] = f"{_calculate_percentage(acc_pass_num, tot_pass_num)}%"
-
-        player_stats['Dribbles completed'] = _format_stat_with_total_percentage('dribbleWon', 'dribbleAttempt', temp_raw_stats)
-        player_stats['Dribble attempts (succ.)'] = player_stats['Dribbles completed']
-        player_stats['Long balls (acc.)'] = _format_stat_with_total_percentage('accurateLongBalls', 'totalLongBalls', temp_raw_stats)
-        player_stats['Crosses (acc.)'] = _format_stat_with_total_percentage('accurateCross', 'totalCross', temp_raw_stats)
-        player_stats['Runs out (succ.)'] = _format_stat_with_total_percentage('keeperSweeperWon', 'totalKeeperSweeper', temp_raw_stats)
-
-        # --- INICIO BLOQUE DE CÁLCULO DE DUELOS CORREGIDO (VISITANTE) ---
-        duel_won_num = 0
-        try: duel_won_num = int(stats_raw.get('duelWon', 0))
-        except (ValueError, TypeError): pass
-        duel_lost_num = 0
-        try: duel_lost_num = int(stats_raw.get('duelLost', 0))
-        except (ValueError, TypeError): pass
-        aerial_won_num = 0
-        try: aerial_won_num = int(stats_raw.get('aerialWon', 0))
-        except (ValueError, TypeError): pass
-        aerial_lost_num = 0
-        try: aerial_lost_num = int(stats_raw.get('aerialLost', 0))
-        except (ValueError, TypeError): pass
-        ground_won_direct_num = None
-        try:
-             val = stats_raw.get('groundDuelWon')
-             if val is not None: ground_won_direct_num = int(val)
-        except (ValueError, TypeError): pass
-        ground_total_direct_num = None
-        try:
-             val = stats_raw.get('groundDuelTotal')
-             if val is not None: ground_total_direct_num = int(val)
-        except (ValueError, TypeError): pass
-
-        duel_total_num = duel_won_num + duel_lost_num
-        aerial_total_num = aerial_won_num + aerial_lost_num
-
-        player_stats['Duels won'] = f"{duel_won_num}/{duel_total_num} ({_calculate_percentage(duel_won_num, duel_total_num)}%)"
-        player_stats['Aerial duels won'] = f"{aerial_won_num}/{aerial_total_num} ({_calculate_percentage(aerial_won_num, aerial_total_num)}%)"
-
-        if ground_won_direct_num is not None and ground_total_direct_num is not None:
-            player_stats['Ground duels (won)'] = f"{ground_won_direct_num}/{ground_total_direct_num} ({_calculate_percentage(ground_won_direct_num, ground_total_direct_num)}%)"
-        else:
-            ground_won_calc = duel_won_num - aerial_won_num
-            ground_total_calc = duel_total_num - aerial_total_num
-            if ground_total_calc >= ground_won_calc and ground_total_calc >= 0:
-                player_stats['Ground duels (won)'] = f"{ground_won_calc}/{ground_total_calc} ({_calculate_percentage(ground_won_calc, ground_total_calc)}%)"
-            else:
-                player_stats['Ground duels (won)'] = f"?/{ground_total_calc} (?%)"
-        # --- FIN BLOQUE DE CÁLCULO DE DUELOS CORREGIDO (VISITANTE) ---
-
-        final_player_data = {key: player_stats[key] for key in FINAL_STATS_KEYS if key in player_stats}
-        final_player_data['player_id'] = player_stats.get('player_id')
-        final_player_data['name'] = player_stats.get('name')
-        final_player_data['short_name'] = player_stats.get('short_name')
-        final_player_data['position'] = player_stats.get('position')
-        final_player_data['jersey_number'] = player_stats.get('jersey_number')
-        final_player_data['is_substitute'] = player_stats.get('is_substitute')
-        final_player_data['proposedMarketValue'] = player_stats.get('proposedMarketValue', 0)
-
-        final_player_data = _convert_stats_to_numeric(final_player_data)
-        parsed_data["away_team_info"]["players"].append(final_player_data)
-
-        rating_value = final_player_data.get('Rating')
-        if isinstance(rating_value, (int, float)) and rating_value > 0:
-            away_player_ratings.append(float(rating_value))
+        processed_player = _process_player_entry(player_entry)
+        if processed_player:
+            parsed_data["away_team_info"]["players"].append(processed_player)
+            market_value = processed_player.get('market_value_eur')
+            if market_value is not None:
+                 away_total_market_value += market_value
+            player_rating = processed_player.get('stats', {}).get('rating')
+            if isinstance(player_rating, (int, float)) and player_rating > 0:
+                away_player_ratings.append(player_rating)
+        # else:
+            # print(f"Advertencia: Entrada de jugador AWAY ignorada: {player_entry.get('player',{}).get('id')}")
 
 
-    # Calcular rating promedio del equipo si hay jugadores con rating
+    # Calculate final team stats
+    parsed_data["home_team_info"]["total_market_value_eur"] = home_total_market_value
     if home_player_ratings:
-        parsed_data["home_team_info"]["sofascore_rating"] = round(sum(home_player_ratings) / len(home_player_ratings), 2)
-    else:
-        parsed_data["home_team_info"]["sofascore_rating"] = None # O 0.0 para evitar None
+        parsed_data["home_team_info"]["sofascore_rating_avg"] = round(sum(home_player_ratings) / len(home_player_ratings), 2)
 
+    parsed_data["away_team_info"]["total_market_value_eur"] = away_total_market_value
     if away_player_ratings:
-        parsed_data["away_team_info"]["sofascore_rating"] = round(sum(away_player_ratings) / len(away_player_ratings), 2)
-    else:
-        parsed_data["away_team_info"]["sofascore_rating"] = None # O 0.0 para evitar None
+        parsed_data["away_team_info"]["sofascore_rating_avg"] = round(sum(away_player_ratings) / len(away_player_ratings), 2)
 
     return parsed_data
 
-async def _fetch_lineup_data_pw(page, match_id):
+# --- Fetching logic ---
+async def _fetch_lineup_data_pw(page, match_id) -> Optional[Union[Dict, List]]:
     """Obtiene datos de la API /lineups usando Playwright."""
     lineup_api_url = f"https://www.sofascore.com/api/v1/event/{match_id}/lineups"
-    event_page_url = f"https://www.sofascore.com/event/{match_id}" # Para contexto
 
     print(f"    Intentando fetch de alineaciones/jugadores para Match ID: {match_id} (API: {lineup_api_url})")
+    response = None
     try:
-        try:
-            await page.goto(event_page_url, wait_until="domcontentloaded", timeout=45000)
-            await asyncio.sleep(random.uniform(1.0, 2.5))
-        except Exception as page_load_err:
-             print(f"    Advertencia: No se pudo cargar la página del evento {match_id}: {type(page_load_err).__name__}. Intentando fetch directo...")
+        # No es necesario visitar la página del evento aquí, fetch directo es suficiente
         response = await page.goto(lineup_api_url, wait_until="commit", timeout=30000)
+
         if response is None:
             print("    -> Error: page.goto a API /lineups devolvió None.")
-            return None
-        if response.status == 200:
+            return {"error": 500, "message": "Playwright goto returned None"} # Devolver error
+
+        status = response.status
+        print(f"    Respuesta API /lineups para {match_id}: Status {status}")
+
+        if status == 200:
             content = await response.text()
+            # Validar si es un objeto JSON
             if content.strip().startswith("{") and content.strip().endswith("}"):
                  try:
                      lineup_object = json.loads(content)
-                     # Devolvemos siempre, aunque no esté confirmado, para que el parser decida
-                     return lineup_object
+                     return lineup_object # Devolver objeto JSON
                  except json.JSONDecodeError as json_err:
                      print(f"    -> Error: No se pudo decodificar el JSON de /lineups. Error: {json_err}. Contenido: {content[:300]}...")
-                     return None
+                     return {"error": 500, "message": f"JSON Decode Error: {json_err}"}
             else:
                 print(f"    -> Error: La respuesta 200 de /lineups no parece ser un objeto JSON válido. Contenido: {content[:200]}...")
-                return None
+                return {"error": 500, "message": "Invalid JSON format in 200 response"}
+        # --- Manejo de errores HTTP ---
         else:
-            body = await response.text()
-            print(f"    -> Error en fetch de API /lineups: {response.status}")
-            if response.status == 403: raise PermissionError(f"403 Forbidden para {lineup_api_url}")
-            elif response.status == 404: return {"error": 404, "message": "Lineups not found"}
-            else: raise ConnectionError(f"Error {response.status} para {lineup_api_url}")
-    except PermissionError as pe:
-         return {"error": 403, "message": "Forbidden"}
+            print(f"    -> Error en fetch de API /lineups: {status}")
+            if status == 403:
+                 return {"error": 403, "message": "Forbidden"}
+            elif status == 404:
+                 # Lineups pueden no existir para todos los partidos
+                 print(f"    -> Alineaciones no encontradas (404) para match {match_id}. Esto puede ser normal.")
+                 return {"error": 404, "message": "Lineups not found"}
+            else:
+                 # Otros errores HTTP
+                 return {"error": status, "message": f"HTTP Error {status}"}
+
+    except asyncio.TimeoutError:
+        print(f"    -> Error: Timeout durante fetch de /lineups para Match ID {match_id}")
+        return {"error": 408, "message": "Request Timeout"}
     except Exception as e:
+        # Captura otros errores de Playwright o red
         print(f"    -> Error inesperado durante fetch de /lineups para Match ID {match_id}: {type(e).__name__}")
-        # traceback.print_exc()
+        # traceback.print_exc() # Descomentar para depuración detallada si es necesario
         return {"error": 500, "message": f"Unexpected error: {type(e).__name__}"}
 
-
-async def extract_player_stats_for_match_ids(match_ids_list):
+# --- Main extraction function ---
+async def extract_player_stats_for_match_ids(match_ids_list: List[Union[str, int]]) -> List[Dict[str, Any]]:
     """
     Recibe una LISTA de IDs de partidos y extrae formación, rating de equipo
     y estadísticas detalladas de jugadores usando la API /lineups.
 
-    Args:
-        match_ids_list (list): Una lista plana de IDs de partidos.
-
     Returns:
-        list: Una lista de diccionarios, donde cada diccionario contiene
-              'match_id' y 'lineup_data' (con formación, rating y jugadores).
+        List[Dict[str, Any]]: Lista de diccionarios, cada uno con "match_id" y "lineup_data".
+                               Incluye entradas vacías o con errores si el fetch falla.
     """
     all_matches_lineups = []
     failed_match_ids = []
@@ -510,77 +309,130 @@ async def extract_player_stats_for_match_ids(match_ids_list):
         context = None
         page = None
 
+        # --- Browser/Context Setup Function (similar a id_extractor) ---
         async def setup_browser_context(existing_browser=None):
-             # (Misma función setup_browser_context)
+             # Usa nonlocal para modificar o devuelve las nuevas instancias
              nonlocal browser, context, page
              if existing_browser:
                  print("    Reiniciando contexto del navegador (jugadores)...")
-                 await existing_browser.close()
-             new_browser = await p.chromium.launch(headless=True) # Poner True para producción
-             new_context = await new_browser.new_context(user_agent=random.choice(USER_AGENTS), viewport={"width": 1366, "height": 768})
+                 try:
+                     await existing_browser.close()
+                 except Exception as close_err:
+                     print(f"    Advertencia: Error al cerrar el navegador existente: {close_err}")
+
+             new_browser = await p.chromium.launch(headless=True)
+             new_context = await new_browser.new_context(
+                 user_agent=random.choice(USER_AGENTS),
+                 viewport={"width": 1366, "height": 768}
+             )
              await new_context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
              new_page = await new_context.new_page()
              try:
+                 # Warm-up visit
                  await new_page.goto(_BASE_SOFASCORE_URL, wait_until="domcontentloaded", timeout=30000)
                  await asyncio.sleep(random.uniform(0.5, 1.5))
-             except Exception as init_err: print(f"    Advertencia: Falló visita principal (jugadores): {init_err}")
-             return new_browser, new_context, new_page
+                 print("    Contexto del navegador (jugadores) inicializado.")
+             except Exception as init_err:
+                 print(f"    Advertencia: Falló visita inicial a {_BASE_SOFASCORE_URL} (jugadores): {init_err}")
 
-        browser, context, page = await setup_browser_context()
+             # Actualiza variables o devuelve
+             browser = new_browser
+             context = new_context
+             page = new_page
+             # O: return new_browser, new_context, new_page
 
-        for i, match_id in enumerate(match_ids_list):
-            print(f"  Procesando Alineaciones Partido {i+1}/{total_ids_to_process} (ID: {match_id})")
-            await asyncio.sleep(random.uniform(2.5, 5.5)) # Pausa entre partidos
+        # Initial browser setup
+        try:
+            await setup_browser_context()
+            # O: browser, context, page = await setup_browser_context()
+        except Exception as initial_setup_err:
+            print(f"Error FATAL: No se pudo inicializar el navegador Playwright (jugadores): {initial_setup_err}")
+            traceback.print_exc()
+            return [] # Salir si falla la inicialización
 
-            lineup_raw_data = await _fetch_lineup_data_pw(page, match_id)
+        # --- Main Processing Loop ---
+        for i, match_id_any in enumerate(match_ids_list):
+            match_id_str = str(match_id_any) # Usar string para consistencia
+            print(f"  Procesando Alineaciones Partido {i+1}/{total_ids_to_process} (ID: {match_id_str})")
+            await asyncio.sleep(random.uniform(2.5, 5.5)) # Pausa respetuosa
 
-            # --- INICIO: Completar el manejo de errores ---
-            if isinstance(lineup_raw_data, dict) and lineup_raw_data.get("error") == 403:
-                print(f"    -> Error 403 obteniendo alineaciones para {match_id}. Intentando recuperación...")
-                failed_match_ids.append(match_id)
-                await asyncio.sleep(random.uniform(15, 25))
-                browser, context, page = await setup_browser_context(browser)
-                continue # Pasar al siguiente ID
-            elif isinstance(lineup_raw_data, dict) and lineup_raw_data.get("error") == 404:
-                print(f"    -> Alineaciones para {match_id} no encontradas (404). Saltando.")
-                failed_match_ids.append(match_id)
-                continue
-            elif lineup_raw_data is None or (isinstance(lineup_raw_data, dict) and lineup_raw_data.get("error")):
-                 # Captura None o cualquier diccionario con una clave "error" (incluyendo el 500 genérico)
-                 error_msg = lineup_raw_data.get('message', 'desconocido') if isinstance(lineup_raw_data, dict) else 'fetch devolvió None'
-                 print(f"    -> Falló la obtención de alineaciones para {match_id} (error: {error_msg}). Saltando.")
-                 failed_match_ids.append(match_id)
-                 # Podríamos implementar recuperación si fallan muchos
-                 await asyncio.sleep(random.uniform(2, 4)) # Pequeña pausa adicional
-                 continue
-            # --- FIN: Completar el manejo de errores ---
+            lineup_raw_data = await _fetch_lineup_data_pw(page, match_id_str)
 
-            # Si llegamos aquí, lineup_raw_data es un diccionario válido con los datos
-            try:
-                # Parsear los datos crudos
-                parsed_lineup_info = _parse_player_lineup_data(lineup_raw_data)
+            # --- Error Handling post-fetch ---
+            fetch_error = None
+            if isinstance(lineup_raw_data, dict) and "error" in lineup_raw_data:
+                fetch_error = lineup_raw_data
 
-                # Añadir al resultado final
+            if fetch_error:
+                error_code = fetch_error.get("error")
+                error_msg = fetch_error.get("message", "Unknown fetch error")
+                print(f"    -> Falló la obtención de alineaciones para {match_id_str} (Error {error_code}): {error_msg}")
+                failed_match_ids.append(match_id_str)
+                # Añadir entrada de error a la lista de resultados
                 all_matches_lineups.append({
-                    "match_id": match_id,
-                    "lineup_data": parsed_lineup_info # Contiene home_team_info y away_team_info
+                    "match_id": match_id_str,
+                    "lineup_data": {"error": error_code, "message": error_msg} # Indicar error
                 })
-                # print(f"    -> Alineaciones/Jugadores procesados para Match ID: {match_id}") # Opcional
 
-            except Exception as parse_err:
-                print(f"    -> Error FATAL parseando datos de alineación para Match ID {match_id}: {parse_err}")
-                traceback.print_exc() # Imprimir stack trace para errores de parseo
-                failed_match_ids.append(match_id)
 
-        # --- Fin del bucle ---
+                if error_code == 403:
+                    print(f"    -> Error 403 detectado. Reiniciando contexto...")
+                    await asyncio.sleep(random.uniform(15, 25))
+                    try:
+                         await setup_browser_context(browser) # Reiniciar
+                         # O: browser, context, page = await setup_browser_context(browser)
+                         print("    -> Contexto del navegador reiniciado.")
+                    except Exception as reset_err:
+                         print(f"Error FATAL: No se pudo reiniciar el navegador después de 403: {reset_err}")
+                         break # Salir del bucle si el reinicio falla críticamente
+                else:
+                    # Pausa corta para otros errores
+                    await asyncio.sleep(random.uniform(2, 4))
+
+                continue # Al siguiente ID
+
+            # --- Proceed with Parsing if fetch was successful ---
+            # Asegurar que no es un diccionario de error y que es un diccionario
+            if lineup_raw_data and isinstance(lineup_raw_data, dict) and "error" not in lineup_raw_data:
+                try:
+                    parsed_lineup_info = _parse_player_lineup_data(lineup_raw_data)
+                    # Añadir resultado exitoso
+                    all_matches_lineups.append({
+                        "match_id": match_id_str,
+                        "lineup_data": parsed_lineup_info # Los datos parseados
+                    })
+                except Exception as parse_err:
+                    print(f"    -> Error FATAL parseando datos de alineación para Match ID {match_id_str}: {parse_err}")
+                    traceback.print_exc()
+                    failed_match_ids.append(match_id_str)
+                    # Añadir entrada de error de parseo
+                    all_matches_lineups.append({
+                         "match_id": match_id_str,
+                         "lineup_data": {"error": 500, "message": f"Parsing Error: {parse_err}"}
+                    })
+            else:
+                 # Caso donde lineup_raw_data es None o un tipo inesperado (no debería pasar con el fetch revisado)
+                 print(f"    -> Advertencia: Fetch para {match_id_str} no devolvió error pero los datos son inválidos/nulos. Saltando.")
+                 failed_match_ids.append(match_id_str)
+                 all_matches_lineups.append({
+                      "match_id": match_id_str,
+                      "lineup_data": {"error": 500, "message": "Invalid or null data received after fetch"}
+                 })
+
+
+        # --- End of Loop ---
         if browser:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception as final_close_err:
+                 print(f"    Advertencia: Error al cerrar el navegador al final (jugadores): {final_close_err}")
 
     print("\n--- Extracción de Alineaciones/Jugadores Finalizada ---")
-    print(f"Partidos con datos de alineación extraídos exitosamente: {len(all_matches_lineups)}")
+    successful_count = sum(1 for item in all_matches_lineups if isinstance(item.get("lineup_data"), dict) and "error" not in item.get("lineup_data", {}))
+    print(f"Datos de alineación/jugador obtenidos para {successful_count} partidos.")
     unique_failed_ids = sorted(list(set(failed_match_ids)))
     if unique_failed_ids:
-        print(f"Partidos con errores o no encontrados: {len(unique_failed_ids)}")
-        print(f"IDs fallidos: {unique_failed_ids}")
+        print(f"Partidos con errores durante fetch/parseo de alineaciones: {len(unique_failed_ids)}")
+        # Podrías imprimir los IDs si son pocos: print(f"IDs fallidos: {unique_failed_ids}")
 
     return all_matches_lineups
