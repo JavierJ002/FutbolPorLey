@@ -2,13 +2,12 @@ import asyncio
 import logging
 import random
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
-from typing import List, Optional, Tuple, Set
+from typing import Optional, Tuple
 # Database utilities
 from database_utils.db_utils import (
     init_db_pool, close_db_pool, get_basic_match_details,
     update_team_match_aggregates
 )
-
 # Extractor functions
 from extractors.id_extractor import scrape_round_match_ids, USER_AGENTS, _BASE_SOFASCORE_URL
 from extractors.statistics_extractor import process_team_stats_for_match
@@ -48,9 +47,10 @@ async def setup_browser_context(p, existing_browser: Optional[Browser] = None) -
 
 
 async def main():
-    NUMERO_DE_RONDAS = 1 # Define how many rounds to process
+    NUMERO_DE_RONDAS = 30 # Define how many rounds to process, add condition in case scrapping only last round, when u finish scrapping the 
+                          # games until present
 
-    # --- Initialize Database Pool ---
+    #Database
     pool = None
     try:
         pool = await init_db_pool()
@@ -62,7 +62,6 @@ async def main():
         return
 
     # --- Phase 1: Get Match IDs and Basic Data ---
-    # This function now also handles inserting tournament, season, team, and match data
     all_match_ids = []
     try:
         print(f"\n--- Iniciando Fase 1: Obtener IDs y Datos Básicos ({NUMERO_DE_RONDAS} rondas) ---")
@@ -95,7 +94,7 @@ async def main():
         for i, match_id in enumerate(all_match_ids):
             print(f"\nProcesando Partido {i+1}/{len(all_match_ids)} (ID: {match_id})")
             match_failed = False
-            team_aggregates = None # To store formation, avg_rating, total_value
+            team_aggregates = None
 
             try:
                 # Get Home/Away Team IDs for this match
@@ -122,7 +121,7 @@ async def main():
                     successful_player_stats_count += 1
                 else:
                     logging.warning(f"Falló el procesamiento de estadísticas de jugador para Match ID {match_id}.")
-                    match_failed = True # Mark as failed if player stats fail
+                    match_failed = True 
 
                 # Update Team Aggregates if player stats were processed successfully
                 if player_stats_success and team_aggregates:
@@ -149,18 +148,17 @@ async def main():
 
 
             except Exception as processing_err:
-                 # Catch potential errors from Playwright (like 403 needing reset) or DB
-                 logging.error(f"Error procesando Match ID {match_id}: {type(processing_err).__name__} - {processing_err}", exc_info=False)
-                 match_failed = True
+                # Catch potential errors from Playwright (like 403 needing reset) or DB
+                logging.error(f"Error procesando Match ID {match_id}: {type(processing_err).__name__} - {processing_err}", exc_info=False)
+                match_failed = True
 
-                 # Check if it's a potential blocking error (e.g., 403)
-                 # This requires inspecting the error or having the functions raise specific exceptions
-                 # For simplicity, we'll try resetting the browser on any exception during processing
-                 logging.warning(f"Error encontrado para Match ID {match_id}. Intentando reiniciar contexto del navegador...")
-                 browser, context, page = await setup_browser_context(p, browser)
-                 if not page:
-                     print("Error FATAL: No se pudo reiniciar el navegador después de un error. Terminando.")
-                     break # Stop processing further matches
+                # Check if it's a potential blocking error (e.g., 403)
+
+                logging.warning(f"Error encontrado para Match ID {match_id}. Intentando reiniciar contexto del navegador...")
+                browser, context, page = await setup_browser_context(p, browser)
+                if not page:
+                    print("Error FATAL: No se pudo reiniciar el navegador después de un error. Terminando.")
+                    break # Stop processing further matches
 
             finally:
                 if match_failed:
@@ -169,7 +167,7 @@ async def main():
                 else:
                     print(f"-> Partido {match_id} procesado exitosamente.")
 
-        # --- Cleanup Playwright ---
+        #Cleanup Playwright
         if browser:
             try:
                 await browser.close()
@@ -177,7 +175,7 @@ async def main():
             except Exception as final_close_err:
                 logging.warning(f"Advertencia: Error al cerrar el navegador Playwright final: {final_close_err}")
 
-    # --- Final Summary ---
+    #Logs Summary
     print("\n--- Proceso Completo Finalizado ---")
     total_processed = len(all_match_ids)
     total_detailed_failures = len(failed_match_ids_detailed)
@@ -187,16 +185,12 @@ async def main():
     print(f"  - Rondas procesadas para IDs/Datos básicos: {NUMERO_DE_RONDAS}")
     print(f"  - Total de partidos encontrados inicialmente: {total_processed}")
     print(f"  - Partidos procesados exitosamente para Stats Detalladas (Equipo y Jugador): {total_detailed_success}")
-    # Note: Counts below might be slightly off if one stat type succeeded but the other failed for a match
-    # print(f"  - Éxito en Stats de Equipo (aprox): {successful_team_stats_count}")
-    # print(f"  - Éxito en Stats de Jugador (aprox): {successful_player_stats_count}")
     print(f"  - Partidos con errores durante procesamiento detallado: {total_detailed_failures}")
     if failed_match_ids_detailed:
         logging.warning(f"IDs de partidos con errores en Fases 2/3: {sorted(list(failed_match_ids_detailed))}")
 
-    # --- Close Database Pool ---
+    #Close Database 
     await close_db_pool()
 
 if __name__ == "__main__":
-    # Ensure the event loop runs the main async function
     asyncio.run(main())

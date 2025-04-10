@@ -6,9 +6,9 @@ USER_AGENTS = [
 ]
 _BASE_SOFASCORE_URL = "https://www.sofascore.com/"
 
-# --- Default values (Consider making these configurable or extracting from API if possible) ---
 _DEFAULT_TOURNAMENT_ID = 8
-_DEFAULT_TOURNAMENT_NAME = "LaLiga"
-_DEFAULT_TOURNAMENT_COUNTRY = "Spain" 
-_DEFAULT_SEASON_ID = 37223
-_DEFAULT_SEASON_NAME = "2021/2022" 
+_DEFAULT_TOURNAMENT_NAME = "laliga"
+_DEFAULT_TOURNAMENT_COUNTRY = "spain" 
+_DEFAULT_SEASON_ID = 61643
+_DEFAULT_SEASON_NAME = "2024/2025" 
+

@@ -6,30 +6,8 @@ import logging
 from playwright.async_api import Page
 import traceback
 from typing import List, Dict, Any, Optional, Union, Tuple
-
-# Import database utility functions
 from database_utils.db_utils import insert_team_stats_batch
-
-# Constants
-
-# Helper functions for safe type conversion (copied from players_statistics_extractor)
-def _safe_to_float(value: Any) -> Optional[float]:
-    if value is None: return None
-    try: return float(str(value).replace(',', '.'))
-    except (ValueError, TypeError): return None
-
-def _safe_to_int(value: Any) -> Optional[int]:
-    if value is None: return None
-    try: return int(float(str(value).replace(',', '.'))) # Use float first for "1.0" etc.
-    except (ValueError, TypeError): return None
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5.1 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-]
-_BASE_SOFASCORE_URL = "https://www.sofascore.com/"
+from helpers.convert_stats import _safe_to_float, _safe_to_int, _convert_to_numeric
 
 # Mapping from SofaScore API stat names to temporary processing keys
 # We'll map these temporary keys to the final DB columns later
@@ -42,8 +20,7 @@ STATS_NAME_MAP_API_TO_TEMP = {
     "Corner kicks": "corners",
     "Fouls": "fouls",
     "Passes": "passes_complex", # e.g., "455/524 (87%)"
-    # "Tackles": "tackles_complex", # Ignore this one as "Total tackles" and "Tackles won" are more reliable
-    "Total tackles": "tackles_total_simple", # Use this for total
+    "Total tackles": "tackles_total_simple",
     "Free kicks": "free_kicks",
     "Yellow cards": "yellow_cards",
     "Red cards": "red_cards",
@@ -96,59 +73,6 @@ TEAM_STATS_DB_ORDER = [
     'interceptions', 'clearances', 'goal_kicks'
 ] # 56 columns total
 
-def _convert_to_numeric(value: Any) -> Optional[Union[int, float, Dict[str, Any], str]]:
-    """
-    Converts a raw stat value from SofaScore API into a numeric type or dict.
-    Handles formats like "123", "12.3", "75%", "12/18 (67%)".
-    """
-    if value is None: return None
-    value_str = str(value).strip()
-    if not value_str: return None
-
-    # Format: "Successful/Total (Percentage%)"
-    if '/' in value_str and '(' in value_str and value_str.endswith(')'):
-        try:
-            parts = value_str.split('(')
-            fraction_part = parts[0].strip()
-            percentage_part = parts[1].split(')')[0].strip('% ')
-            successful, total = map(int, fraction_part.split('/'))
-            # Ensure percentage is derived correctly, handle potential format variations
-            percentage = round(float(percentage_part) / 100.0, 4) if percentage_part else None
-            # Recalculate percentage if possible and seems incorrect
-            if total > 0 and percentage is not None:
-                 calculated_perc = round(successful / total, 4)
-                 # Allow small tolerance for rounding differences
-                 if abs(percentage - calculated_perc) > 0.005:
-                      logging.debug(f"Adjusting percentage for {value_str}. API: {percentage}, Calc: {calculated_perc}")
-                      percentage = calculated_perc
-            elif total > 0 and percentage is None:
-                 percentage = round(successful / total, 4)
-
-            return {"successful": successful, "total": total, "percentage": percentage}
-        except (ValueError, IndexError, TypeError, ZeroDivisionError):
-             logging.warning(f"Could not parse complex stat: {value_str}")
-             return {"successful": None, "total": None, "percentage": None} # Return dict with None
-
-    # Format: "Percentage%"
-    elif value_str.endswith('%'):
-        try:
-            return round(float(value_str.strip('% ')) / 100.0, 4)
-        except ValueError:
-            logging.warning(f"Could not parse percentage: {value_str}")
-            return None
-
-    # Format: "Integer" or "Float"
-    else:
-        try:
-            # Try float first to handle "1.0" etc. then try int
-            float_val = float(value_str.replace(',', '.'))
-            if float_val.is_integer():
-                return int(float_val)
-            else:
-                return float_val
-        except ValueError:
-            logging.warning(f"Could not parse simple numeric: {value_str}")
-            return None # Return None if not clearly numeric
 
 def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home_team_id: int, away_team_id: int) -> List[Tuple]:
     """
@@ -213,9 +137,7 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
             final_stats_map['team_id'] = team_id
             final_stats_map['is_home_team'] = is_home
             final_stats_map['period'] = period_code
-            # formation, average_team_rating, total_team_market_value_eur are set later
 
-            # Simple mappings
             for temp_key, db_key in [
                 ('possession_percentage', 'possession_percentage'), ('big_chances', 'big_chances'),
                 ('total_shots', 'total_shots'), ('saves', 'saves'), ('corners', 'corners'),
@@ -228,10 +150,9 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
                 ('throw_ins', 'throw_ins'), ('final_third_entries', 'final_third_entries'),
                 ('dispossessed', 'dispossessed'), ('interceptions', 'interceptions'),
                 ('clearances', 'clearances'), ('goal_kicks', 'goal_kicks'),
-                ('tackles_total_simple', 'tackles_total') # Use simple total if complex not available
+                ('tackles_total_simple', 'tackles_total') 
             ]:
                 if temp_key in stats:
-                    # Ensure simple numeric stats are int/float, not dicts
                     value = stats[temp_key]
                     if isinstance(value, dict):
                          logging.warning(f"Match {match_id}, Period {period_code}, Team {team_id}: Expected simple numeric for {temp_key}, got dict. Setting to None.")
@@ -239,7 +160,6 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
                     else:
                          final_stats_map[db_key] = value
 
-            # Complex mappings (extract successful, total, percentage)
             for complex_key, s_key, t_key, p_key in [
                 ('passes_complex', 'passes_successful', 'passes_total', 'passes_percentage'),
                 ('long_balls_complex', 'long_balls_successful', 'long_balls_total', 'long_balls_percentage'),
@@ -256,19 +176,17 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
                     final_stats_map[t_key] = complex_value.get('total')
                     final_stats_map[p_key] = complex_value.get('percentage')
                 elif isinstance(complex_value, (int, float)):
-                     # If it's a simple number, assume it's the total count or maybe won count?
-                     # Let's prioritize assigning to the 'total' column if available.
-                     # For 'duels_won_complex', the simple number might represent 'duels won %' as float.
-                     if complex_key == 'duels_won_complex' and isinstance(complex_value, float) and complex_value <= 1.0:
-                         # If it's 'Duels' and a float <= 1, assume it's the percentage
-                         if p_key:
-                             final_stats_map[p_key] = complex_value
-                     elif t_key: # Ensure a total key exists (e.g., passes_total)
-                         final_stats_map[t_key] = complex_value
-                     # Leave successful and percentage as None/0 unless handled above
+                    
+                    if complex_key == 'duels_won_complex' and isinstance(complex_value, float) and complex_value <= 1.0:
+                        # If it's 'Duels' and a float <= 1, assume it's the percentage
+                        if p_key:
+                            final_stats_map[p_key] = complex_value
+                    elif t_key: # Ensure a total key exists (e.g., passes_total)
+                        final_stats_map[t_key] = complex_value
+                     
                 elif complex_value is not None:
-                     # Log warning only if it's neither dict nor number (truly unexpected format)
-                     logging.warning(f"Match {match_id}, Period {period_code}, Team {team_id}: Unexpected type or format for {complex_key}: {type(complex_value)}. Value: {complex_value}")
+                    #Log warning only if it's neither dict nor number (truly unexpected format)
+                    logging.warning(f"Match {match_id}, Period {period_code}, Team {team_id}: Unexpected type or format for {complex_key}: {type(complex_value)}. Value: {complex_value}")
 
             # Handle accurate_passes_percentage (can be simple float or complex dict)
             acc_pass_val = stats.get('accurate_passes_percentage_complex')
@@ -294,9 +212,9 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
                 final_stats_map['tackles_total'] = tackles_won_data.get('total') if tackles_won_data.get('total') is not None else stats.get('tackles_total_simple')
                 final_stats_map['tackles_won_percentage'] = tackles_won_data.get('percentage')
             else:
-                # Fallback if 'tackles_won_details' wasn't parsed correctly or missing
+                
                 final_stats_map['tackles_total'] = stats.get('tackles_total_simple')
-                # Cannot determine successful/percentage without more data
+                
 
 
             # Create the final tuple in the correct DB order
@@ -327,13 +245,6 @@ async def _fetch_stats_data_pw(page: Page, match_id: str) -> Optional[Union[List
 
     response = None
     try:
-        # Optional: Visit event page first
-        # try:
-        #     logging.debug(f"    Visitando página del evento: {event_page_url}")
-        #     await page.goto(event_page_url, wait_until="domcontentloaded", timeout=45000)
-        #     await asyncio.sleep(random.uniform(0.5, 1.5))
-        # except Exception as page_err:
-        #      logging.warning(f"    Advertencia: Falló visita a página de evento {match_id}: {page_err}")
 
         logging.debug(f"    Realizando fetch directo a API: {stats_api_url}")
         response = await page.goto(stats_api_url, wait_until="commit", timeout=30000)
@@ -407,7 +318,7 @@ async def process_team_stats_for_match(page: Page, match_id: int, home_team_id: 
          logging.error(f"    -> Error: Fetch para {match_id} no devolvió una lista de estadísticas.")
          return False
 
-    # --- Parse and Insert Data ---
+    #Parse and Insert Data
     parsed_batch = []
     parse_error = False
     try:
@@ -421,7 +332,7 @@ async def process_team_stats_for_match(page: Page, match_id: int, home_team_id: 
         logging.warning(f"    -> No se encontraron/procesaron datos de estadísticas de equipo válidos para Match ID {match_id}. Saltando inserción.")
         return False
 
-    # --- Database Operation ---
+    #Database
     db_success = True
     try:
         await insert_team_stats_batch(parsed_batch)
@@ -432,4 +343,3 @@ async def process_team_stats_for_match(page: Page, match_id: int, home_team_id: 
 
     return db_success
 
-# Note: The main execution loop and browser management are now expected to be in main.py

@@ -4,27 +4,17 @@ import random
 import logging
 from playwright.async_api import Page
 import traceback
-from typing import Any, Dict, List, Optional, Union, Tuple
-
-# Import database utility functions
+from typing import Any, Dict, Optional, Tuple
+from config.driver_setup import (USER_AGENTS, _BASE_SOFASCORE_URL, _DEFAULT_TOURNAMENT_ID, _DEFAULT_TOURNAMENT_NAME,
+                                _DEFAULT_TOURNAMENT_COUNTRY, _DEFAULT_SEASON_ID, _DEFAULT_SEASON_NAME)
 from database_utils.db_utils import upsert_player, insert_player_stats_batch
-
-# Constants
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5.1 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-]
-_BASE_SOFASCORE_URL = "https://www.sofascore.com/"
+# Convertion functions
+from helpers.convert_stats import _safe_to_float, _safe_to_int
 
 # Mapping from SofaScore API keys to database column names for player_match_stats
-# Ensure this matches the order in insert_player_stats_batch SQL!
 SOFASCORE_API_TO_DB_STATS_MAP = {
     # Order MUST match the VALUES clause in insert_player_stats_batch
     # IDs and basic info (handled separately)
-    # match_id, player_id, team_id, is_substitute, played_position, jersey_number,
-    # market_value_eur_at_match, sofascore_rating,
     'minutesPlayed': 'minutes_played',
     'touches': 'touches',
     'goals': 'goals',
@@ -80,16 +70,6 @@ DB_STATS_ORDER = [
     'sweeper_keeper_successful', 'sweeper_keeper_total'
 ] # 39 stats columns
 
-# Helper functions for safe type conversion
-def _safe_to_float(value: Any) -> Optional[float]:
-    if value is None: return None
-    try: return float(str(value).replace(',', '.'))
-    except (ValueError, TypeError): return None
-
-def _safe_to_int(value: Any) -> Optional[int]:
-    if value is None: return None
-    try: return int(float(str(value).replace(',', '.'))) # Use float first for "1.0" etc.
-    except (ValueError, TypeError): return None
 
 def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: int) -> Optional[Tuple[Tuple, Tuple]]:
     """
@@ -102,7 +82,7 @@ def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: 
         Returns None if essential data is missing.
     """
     player_info = player_entry.get("player")
-    stats_raw = player_entry.get("statistics", {}) # Default to empty dict
+    stats_raw = player_entry.get("statistics", {})
 
     if not player_info or not player_info.get("id"):
         logging.warning(f"Match {match_id}: Datos básicos faltantes para entrada de jugador: {player_entry.get('player', {}).get('id')}")
@@ -111,7 +91,6 @@ def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: 
     player_id = player_info["id"]
     player_name = player_info.get("name")
     height_cm = _safe_to_int(player_info.get("height"))
-    # Use primary position from player details if available, fallback to lineup position
     primary_position = player_info.get("position")
     played_position = player_entry.get("position", primary_position) # Position played in this match
     country_name = player_info.get("country", {}).get("name")
@@ -120,12 +99,12 @@ def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: 
     market_value_eur = _safe_to_int(player_info.get("proposedMarketValueRaw", {}).get("value"))
     sofascore_rating = _safe_to_float(stats_raw.get('rating')) # Rating is in stats
 
-    # Tuple for upsert_player (player_id, name, height_cm, primary_position, country_name)
+    # Tuple 
     player_tuple = (
         player_id,
         player_name,
         height_cm,
-        primary_position, # Store general position here
+        primary_position,
         country_name
     )
 
@@ -136,47 +115,40 @@ def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: 
         player_id,
         team_id,
         is_substitute,
-        played_position, # Store played position here
+        played_position, 
         jersey_number,
-        market_value_eur, # Market value at the time of the match (or latest known)
+        market_value_eur, # Not by timestamp... Mostlikely data leakage if keeped
         sofascore_rating
-    ] # 8 fields
+    ] 
 
     # Extract stats based on the map and order
     extracted_stats = []
     calculated_stats = {} # For stats derived from others
 
     # Calculate derived stats first if needed
-    # Example: ground_duels_won = duels_won - aerials_won
     duels_won = _safe_to_int(stats_raw.get('duelWon'))
     aerials_won = _safe_to_int(stats_raw.get('aerialWon'))
     if duels_won is not None and aerials_won is not None:
         calculated_stats['ground_duels_won'] = duels_won - aerials_won
     else:
-        calculated_stats['ground_duels_won'] = None # Or 0 if preferred
+        calculated_stats['ground_duels_won'] = None 
 
-    # Example: duels_lost = total_duels - duels_won (if total_duels available)
-    # Sofascore API might not provide total duels directly, often just won/lost
-    # We'll rely on 'duelLost' if present, otherwise leave as None/0
     calculated_stats['duels_lost'] = _safe_to_int(stats_raw.get('duelLost'))
     calculated_stats['aerials_lost'] = _safe_to_int(stats_raw.get('aerialLost'))
 
-    # Iterate through the required DB_STATS_ORDER
     for db_key in DB_STATS_ORDER:
         found_value = None
-        # Check if it's a calculated stat
         if db_key in calculated_stats:
             found_value = calculated_stats[db_key]
         else:
-            # Find the corresponding API key
             api_key = next((api for api, db in SOFASCORE_API_TO_DB_STATS_MAP.items() if db == db_key), None)
             if api_key and api_key in stats_raw:
-                 raw_value = stats_raw[api_key]
-                 # Convert based on type (rating handled above)
-                 found_value = _safe_to_int(raw_value) # Default to int for most stats
+                raw_value = stats_raw[api_key]
+                 
+                found_value = _safe_to_int(raw_value)
 
-        # Append the found value (or None/0)
-        extracted_stats.append(found_value if found_value is not None else 0) # Default to 0 for stats
+        
+        extracted_stats.append(found_value if found_value is not None else 0) 
 
     # Combine prefix and extracted stats
     player_stats_tuple = tuple(stats_tuple_prefix + extracted_stats)
@@ -244,6 +216,7 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
     Returns:
         True if processing and database insertion were successful, False otherwise.
     """
+
     logging.info(f"  Procesando Alineaciones/Jugadores Partido ID: {match_id}")
     await asyncio.sleep(random.uniform(1.5, 3.5)) # Shorter delay as browser context is reused
 
@@ -253,11 +226,8 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
         error_code = lineup_raw_data.get("error", 500) if isinstance(lineup_raw_data, dict) else 500
         error_msg = lineup_raw_data.get("message", "Fetch failed or returned None") if isinstance(lineup_raw_data, dict) else "Fetch failed"
         logging.error(f"    -> Falló la obtención de alineaciones para {match_id} (Error {error_code}): {error_msg}")
-        # Decide if a 403 requires browser reset (handled in main loop now)
-        # if error_code == 403: raise PlaywrightError("403 Forbidden") # Signal main loop to reset
-        return False, None # Failed to fetch, return tuple
+        return False, None 
 
-    # --- Parse and Insert Data ---
     players_to_upsert = []
     player_stats_to_insert = []
     parse_error = False
@@ -266,7 +236,6 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
         home_data = lineup_raw_data.get("home", {})
         away_data = lineup_raw_data.get("away", {})
 
-        # Process Home Team Players
         for player_entry in home_data.get("players", []):
             processed_data = _process_player_entry(player_entry, match_id, home_team_id)
             if processed_data:
@@ -289,17 +258,14 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
         logging.warning(f"    -> No se encontraron/procesaron datos de jugadores válidos para Match ID {match_id}. Saltando inserción.")
         return False, None # Indicate failure if parsing failed or no players found, return tuple
 
-    # --- Database Operations ---
+    #Database
+
     db_success = True
     try:
-        # Upsert players first (handle potential duplicates)
-        # Use execute_many for potential efficiency, though individual upserts might be safer
-        # depending on transaction handling preference. Let's stick to individual upserts for players.
         player_upsert_tasks = [upsert_player(*player_tuple) for player_tuple in players_to_upsert]
         await asyncio.gather(*player_upsert_tasks)
         logging.info(f"    -> Upserted {len(players_to_upsert)} jugadores para Match ID {match_id}.")
 
-        # Insert player stats in batch
         await insert_player_stats_batch(player_stats_to_insert)
         logging.info(f"    -> Insertadas/Actualizadas {len(player_stats_to_insert)} estadísticas de jugador para Match ID {match_id}.")
 
@@ -308,7 +274,6 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
         return False, None # Return tuple indicating failure
 
     # If DB operations succeeded, return success status and the extracted aggregate data
-    # Correctly calculate aggregate data using proper tuple indices
     home_ratings = [p[7] for p in player_stats_to_insert if p[2] == home_team_id and p[7] is not None and p[7] > 0]
     home_values = [p[6] for p in player_stats_to_insert if p[2] == home_team_id and p[6] is not None]
     away_ratings = [p[7] for p in player_stats_to_insert if p[2] == away_team_id and p[7] is not None and p[7] > 0]
@@ -329,4 +294,3 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
 
     return db_success, aggregate_data
 
-# Note: The main execution loop and browser management are now expected to be in main.py

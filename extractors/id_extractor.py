@@ -1,29 +1,13 @@
 import asyncio
 import json
 import random
-import time
 import logging
 from playwright.async_api import async_playwright
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
-
-# Import database utility functions
+from config.driver_setup import (USER_AGENTS, _BASE_SOFASCORE_URL, _DEFAULT_TOURNAMENT_ID, _DEFAULT_TOURNAMENT_NAME,
+                                _DEFAULT_TOURNAMENT_COUNTRY, _DEFAULT_SEASON_ID, _DEFAULT_SEASON_NAME)
 from database_utils.db_utils import upsert_tournament, upsert_season, upsert_team, upsert_match
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5.1 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-]
-_BASE_SOFASCORE_URL = "https://www.sofascore.com/"
-
-# --- Default values (Consider making these configurable or extracting from API if possible) ---
-_DEFAULT_TOURNAMENT_ID = 8
-_DEFAULT_TOURNAMENT_NAME = "LaLiga"
-_DEFAULT_TOURNAMENT_COUNTRY = "Spain" # Or extract if available
-_DEFAULT_SEASON_ID = 32501
-_DEFAULT_SEASON_NAME = "2020/2021" # Or extract if available
 
 async def _process_event_data(event: Dict[str, Any], round_num: int) -> Optional[int]:
     """
@@ -58,27 +42,26 @@ async def _process_event_data(event: Dict[str, Any], round_num: int) -> Optional
         season_id = season_info.get("id", _DEFAULT_SEASON_ID)
         season_name = season_info.get("name", _DEFAULT_SEASON_NAME)
 
-        round_number = round_info.get("round", round_num) # Use passed round_num as fallback
-        round_name = round_info.get("name") # Can be null
+        round_number = round_info.get("round", round_num) 
+        round_name = round_info.get("name") 
 
         home_team_id = home_team_info["id"]
         home_team_name = home_team_info.get("name")
-        home_team_country = home_team_info.get("country", {}).get("name") # Can be null
+        home_team_country = home_team_info.get("country", {}).get("name") 
 
         away_team_id = away_team_info["id"]
         away_team_name = away_team_info.get("name")
-        away_team_country = away_team_info.get("country", {}).get("name") # Can be null
+        away_team_country = away_team_info.get("country", {}).get("name") 
 
-        # Convert Unix timestamp to timezone-aware datetime object (UTC)
         match_datetime_utc = datetime.fromtimestamp(timestamp_unix, tz=timezone.utc)
 
-        # Scores (handle potential missing keys gracefully)
+        
         home_score_final = home_score_info.get("current")
         away_score_final = away_score_info.get("current")
-        home_score_ht = home_score_info.get("period1") # Halftime score
-        away_score_ht = away_score_info.get("period1") # Halftime score
+        home_score_ht = home_score_info.get("period1") 
+        away_score_ht = away_score_info.get("period1") 
 
-        # --- Upsert Data into Database (Order matters due to Foreign Keys) ---
+        
         await upsert_tournament(tournament_id, tournament_name, tournament_country)
         await upsert_season(season_id, tournament_id, season_name)
         await upsert_team(home_team_id, home_team_name, home_team_country)
@@ -115,13 +98,11 @@ async def scrape_round_match_ids(num_rounds=1) -> List[int]:
     print(f"--- Iniciando scrapeo y guardado de datos básicos (Torneo, Temporada, Equipos, Partidos) ---")
     print(f"Procesando Rondas: 1 a {num_rounds}")
 
-    # Upsert default tournament/season once (can be moved inside loop if needed)
     try:
         await upsert_tournament(_DEFAULT_TOURNAMENT_ID, _DEFAULT_TOURNAMENT_NAME, _DEFAULT_TOURNAMENT_COUNTRY)
         await upsert_season(_DEFAULT_SEASON_ID, _DEFAULT_TOURNAMENT_ID, _DEFAULT_SEASON_NAME)
     except Exception as db_init_err:
         logging.error(f"Error inicializando torneo/temporada en DB: {db_init_err}")
-        # Decide if you want to continue or stop if this fails
 
     async with async_playwright() as p:
         browser = None
@@ -154,7 +135,7 @@ async def scrape_round_match_ids(num_rounds=1) -> List[int]:
                 page = new_page
             except Exception as setup_err:
                  logging.error(f"    Error grave durante la configuración del navegador: {setup_err}")
-                 raise # Re-raise to stop the process if browser setup fails
+                 raise 
 
         try:
              await setup_browser_context()
@@ -170,7 +151,7 @@ async def scrape_round_match_ids(num_rounds=1) -> List[int]:
 
             match_ids_in_round = []
             try:
-                await asyncio.sleep(random.uniform(3, 7)) # Delay before request
+                await asyncio.sleep(random.uniform(3, 7)) # Delay 
 
                 # Visit round page first (optional, might help with session/cookies)
                 try:
@@ -225,9 +206,7 @@ async def scrape_round_match_ids(num_rounds=1) -> List[int]:
 
             except Exception as e:
                 logging.error(f"    -> Error general procesando Ronda {round_num}: {type(e).__name__} - {e}", exc_info=False)
-                # Decide if you want to continue to the next round or stop
 
-        # --- Cleanup ---
         if browser:
             try:
                  await browser.close()
@@ -239,10 +218,4 @@ async def scrape_round_match_ids(num_rounds=1) -> List[int]:
     print(f"Total de IDs de partidos procesados exitosamente: {len(processed_match_ids)}")
     return sorted(list(set(processed_match_ids))) # Return unique, sorted list of IDs
 
-# Example of how to call (in main.py):
-# async def main():
-#     pool = await init_db_pool()
-#     if not pool: return
-#     match_ids = await scrape_round_match_ids(num_rounds=1)
-#     # ... use match_ids ...
-#     await close_db_pool()
+

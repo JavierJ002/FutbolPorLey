@@ -1,25 +1,20 @@
 # database_utils/db_utils.py
 import asyncpg
 import os
-import re # Import regular expression module
+import re 
 from dotenv import load_dotenv
 import logging
 from typing import List, Dict, Any, Tuple, Optional, Union
 
-# Configurar logging básico
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Cargar variables de entorno
 load_dotenv(encoding='utf-8')
 
-# --- Configuración del Pool de Conexiones Asíncrono ---
 DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
-DB_PASS = os.getenv("DB_PASSWORD") # Asegúrate que .env use DB_PASSWORD
+DB_PASS = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 
-# Variable global para el pool
 db_pool: Optional[asyncpg.Pool] = None
 
 async def init_db_pool():
@@ -37,15 +32,15 @@ async def init_db_pool():
             host=DB_HOST,
             port=DB_PORT,
             min_size=1,
-            max_size=5, # Ajusta según la concurrencia esperada
-            command_timeout=60 # Timeout para comandos
+            max_size=5, 
+            command_timeout=50 
         )
         logging.info("Pool de conexiones asyncpg inicializado.")
         return db_pool
     except (Exception, asyncpg.PostgresError) as error:
         logging.error(f"Error al inicializar el pool de conexiones asyncpg: {error}")
         db_pool = None
-        raise # Relanzar para que el main sepa que falló
+        raise 
 
 async def close_db_pool():
     """Cierra el pool de conexiones asyncpg."""
@@ -104,13 +99,10 @@ async def execute_query(sql: str, params: Optional[Tuple] = None, fetch: bool = 
                 # Para INSERT/UPDATE/DELETE, execute devuelve el estado (e.g., 'INSERT 0 1')
                 status = await connection.execute(sql, *params if params else [])
                 logging.debug(f"Ejecutada SQL (execute): {sql[:100]}... con params: {params} -> Status: {status}")
-                return status # Devuelve el estado de la operación
+                return status 
 
         except (asyncpg.PostgresError, OSError) as error: # OSError puede ocurrir si la conexión se pierde
             logging.error(f"Error ejecutando SQL: {sql[:100]}... Error: {error}")
-            # No necesitamos rollback explícito con `async with connection.transaction():`
-            # pero aquí no estamos usando una transacción explícita por simplicidad.
-            # asyncpg maneja implícitamente transacciones por comando si no se especifica.
             return None
         except Exception as e:
              logging.error(f"Error inesperado ejecutando SQL: {sql[:100]}... Error: {type(e).__name__} - {e}")
@@ -133,9 +125,8 @@ async def execute_many(sql: str, data_list: List[Tuple]):
         return False
     if not data_list:
         logging.warning("execute_many llamado con lista de datos vacía.")
-        return True # Considerar éxito si no hay nada que hacer
+        return True 
 
-    # Convert %s placeholders to $1, $2, ... using re.sub
     count = 0
     def repl(match):
         nonlocal count
@@ -145,25 +136,20 @@ async def execute_many(sql: str, data_list: List[Tuple]):
 
 
     async with db_pool.acquire() as connection:
-        # Usar una transacción explícita para asegurar atomicidad del lote
         async with connection.transaction():
             try:
-                # executemany es eficiente para lotes
                 await connection.executemany(sql, data_list)
                 logging.info(f"Ejecutado lote SQL ({len(data_list)} filas): {sql[:100]}...")
                 return True
             except (asyncpg.PostgresError, OSError) as error:
                 logging.error(f"Error ejecutando lote SQL: {sql[:100]}... Error: {error}")
-                # La transacción hará rollback automáticamente al salir del bloque with por error
                 return False
             except Exception as e:
                  logging.error(f"Error inesperado ejecutando lote SQL: {sql[:100]}... Error: {type(e).__name__} - {e}")
                  return False
 
-# --- Funciones específicas de Inserción/Actualización (Adaptadas a async) ---
+#Funciones específicas de Inserción/Actualización 
 
-# Nota: Las funciones `upsert_*` ahora son `async` y usan `execute_query` (que es async)
-# Nota 2: Los parámetros deben pasarse como tupla a execute_query
 
 async def upsert_tournament(tournament_id: int, name: str, country: Optional[str]):
     sql = """
@@ -207,7 +193,6 @@ async def upsert_match(match_id: int, season_id: int, round_num: Optional[int], 
                  home_id: int, away_id: int, home_score: Optional[int] = None,
                  away_score: Optional[int] = None, ht_home: Optional[int] = None,
                  ht_away: Optional[int] = None):
-    # Asegúrate que dt_utc sea un objeto datetime compatible con asyncpg (datetime.datetime con tzinfo)
     sql = """
         INSERT INTO matches (match_id, season_id, round_number, round_name, match_datetime_utc,
                              home_team_id, away_team_id, home_score, away_score,
@@ -229,7 +214,6 @@ async def upsert_match(match_id: int, season_id: int, round_num: Optional[int], 
               home_score, away_score, ht_home, ht_away)
     await execute_query(sql, params)
 
-# Funciones para insertar estadísticas (usar execute_many)
 async def insert_player_stats_batch(player_stats_list: List[Tuple]):
     """
     Inserta un lote de estadísticas de jugadores de forma asíncrona.
@@ -237,8 +221,6 @@ async def insert_player_stats_batch(player_stats_list: List[Tuple]):
     """
     if not player_stats_list: return
 
-    # SQL con placeholders $1, $2...
-    # ¡Asegúrate de que el número de placeholders coincida con los campos de la tupla! (47 campos)
     sql = """
         INSERT INTO player_match_stats (
             match_id, player_id, team_id, is_substitute, played_position, jersey_number,
@@ -293,8 +275,6 @@ async def insert_team_stats_batch(team_stats_list: List[Tuple]):
     """
     if not team_stats_list: return
 
-    # SQL con placeholders $1, $2...
-    # ¡Verifica el orden y número de columnas! (56 columnas)
     sql = """
         INSERT INTO team_match_stats (
             match_id, team_id, is_home_team, period, formation, average_team_rating,
@@ -359,13 +339,11 @@ async def update_team_match_aggregates(match_id: int, team_id: int, is_home: boo
             total_team_market_value_eur = $3
         WHERE match_id = $4 AND team_id = $5 AND period = 'ALL';
     """
-    # Note: is_home is not strictly needed for the WHERE clause but good for logging/context
     params = (formation, avg_rating, total_value, match_id, team_id)
     status = await execute_query(sql, params)
     logging.debug(f"Updated team aggregates for Match {match_id}, Team {team_id} (Home: {is_home}). Status: {status}")
 
 
-# --- Funciones Adicionales (Ejemplo: Obtener detalles básicos del partido) ---
 async def get_basic_match_details(match_id: int) -> Optional[Dict[str, Any]]:
     """Obtiene IDs de equipos y datetime de un partido de forma asíncrona."""
     sql = """
