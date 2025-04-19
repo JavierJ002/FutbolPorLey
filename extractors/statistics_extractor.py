@@ -1,3 +1,4 @@
+#statistics_extractor_py
 import asyncio
 import json
 import random
@@ -46,7 +47,18 @@ STATS_NAME_MAP_API_TO_TEMP = {
     "Tackles won": "tackles_won_details", # Contains successful/total/percentage despite API name "wonTacklePercent"
     "Interceptions": "interceptions",
     "Clearances": "clearances",
-    "Goal kicks": "goal_kicks"
+    "Goal kicks": "goal_kicks",
+    # Team stats added in the previous request, keeping them here
+    "Expected goals (xG)": "expected_goals_team",
+    "Touches in opposition box": "touches_in_penalty_area",
+    "Passes into final third": "passes_in_final_third",
+    "Recoveries": "recoveries",
+    "Errors leading to shot": "errors_lead_to_shot",
+    "Goals prevented": "goals_prevented_team", # API name guess
+    "Big saves": "big_saves", # API name guess
+    "Errors leading to goal": "errors_lead_to_goal", # API name guess
+    "Penalties saved": "penalty_saves_team", # API name guess (for team stats context)
+    "Big chances scored": "big_chances_scored" # API name guess
 }
 
 # Order of columns for the team_match_stats table INSERT statement
@@ -70,9 +82,12 @@ TEAM_STATS_DB_ORDER = [
     'ground_duels_successful', 'ground_duels_total', 'ground_duels_percentage',
     'aerial_duels_successful', 'aerial_duels_total', 'aerial_duels_percentage',
     'dribbles_successful', 'dribbles_total', 'dribbles_percentage',
-    'interceptions', 'clearances', 'goal_kicks'
-] # 56 columns total
-
+    'interceptions', 'clearances', 'goal_kicks',
+    # Team stats DB columns added in the previous request
+    'expected_goals', 'touches_in_penalty_area', 'passes_in_final_third', 'recoveries',
+    'errors_lead_to_shot', 'goals_prevented', 'big_saves', 'errors_lead_to_goal',
+    'penalty_saves', 'big_chances_scored'
+] # Total columns: 66
 
 def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home_team_id: int, away_team_id: int) -> List[Tuple]:
     """
@@ -118,9 +133,21 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
                                 "total": _safe_to_int(total),
                                 "percentage": percentage
                             }
+                         # Handle expected goals and goals prevented separately as they are floats
+                        elif temp_key in ['expected_goals_team', 'goals_prevented_team']:
+                            raw_value = item.get(team_loc)
+                            converted_value = _safe_to_float(raw_value) # xG, G+ are floats
+                        # Handle other new integer stats
+                        elif temp_key in ['touches_in_penalty_area', 'passes_in_final_third', 'recoveries',
+                                          'errors_lead_to_shot', 'big_saves',
+                                          'errors_lead_to_goal', 'penalty_saves_team', 'big_chances_scored']:
+                            raw_value = item.get(team_loc)
+                            converted_value = _safe_to_int(raw_value) # These are expected to be integers/counts
                         else:
+                            # Use general converter for other known types
                             raw_value = item.get(team_loc)
                             converted_value = _convert_to_numeric(raw_value)
+
 
                         # Store the converted value (can be int, float, dict, or None)
                         temp_stats_data[period_code][team_loc][temp_key] = converted_value
@@ -150,7 +177,19 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
                 ('throw_ins', 'throw_ins'), ('final_third_entries', 'final_third_entries'),
                 ('dispossessed', 'dispossessed'), ('interceptions', 'interceptions'),
                 ('clearances', 'clearances'), ('goal_kicks', 'goal_kicks'),
-                ('tackles_total_simple', 'tackles_total') 
+                ('tackles_total_simple', 'tackles_total'),
+                # Mapping new team stats temporary keys to final DB keys
+                ('expected_goals_team', 'expected_goals'),
+                ('touches_in_penalty_area', 'touches_in_penalty_area'),
+                ('passes_in_final_third', 'passes_in_final_third'),
+                ('recoveries', 'recoveries'),
+                ('errors_lead_to_shot', 'errors_lead_to_shot'),
+                ('goals_prevented_team', 'goals_prevented'),
+                ('big_saves', 'big_saves'),
+                ('errors_lead_to_goal', 'errors_lead_to_goal'),
+                ('penalty_saves_team', 'penalty_saves'),
+                ('big_chances_scored', 'big_chances_scored')
+
             ]:
                 if temp_key in stats:
                     value = stats[temp_key]
@@ -176,14 +215,14 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
                     final_stats_map[t_key] = complex_value.get('total')
                     final_stats_map[p_key] = complex_value.get('percentage')
                 elif isinstance(complex_value, (int, float)):
-                    
+
                     if complex_key == 'duels_won_complex' and isinstance(complex_value, float) and complex_value <= 1.0:
                         # If it's 'Duels' and a float <= 1, assume it's the percentage
                         if p_key:
                             final_stats_map[p_key] = complex_value
                     elif t_key: # Ensure a total key exists (e.g., passes_total)
                         final_stats_map[t_key] = complex_value
-                     
+
                 elif complex_value is not None:
                     #Log warning only if it's neither dict nor number (truly unexpected format)
                     logging.warning(f"Match {match_id}, Period {period_code}, Team {team_id}: Unexpected type or format for {complex_key}: {type(complex_value)}. Value: {complex_value}")
@@ -212,9 +251,7 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
                 final_stats_map['tackles_total'] = tackles_won_data.get('total') if tackles_won_data.get('total') is not None else stats.get('tackles_total_simple')
                 final_stats_map['tackles_won_percentage'] = tackles_won_data.get('percentage')
             else:
-                
                 final_stats_map['tackles_total'] = stats.get('tackles_total_simple')
-                
 
 
             # Create the final tuple in the correct DB order
@@ -222,17 +259,29 @@ def _parse_statistics_data(statistics_json_list: List[Dict], match_id: int, home
             stat_tuple = []
             for key in TEAM_STATS_DB_ORDER:
                 value = final_stats_map.get(key)
-                # Default integer columns to 0 if None, check column type implicitly by name
-                if value is None and any(k in key for k in ['_successful', '_total', '_cards', '_kicks', 'shots_', 'chances', 'fouls', 'corners', 'saves', 'offsides', 'throw_ins', 'entries', 'dispossessed', 'interceptions', 'clearances']):
+                # Default integer columns to 0 if None
+                # Add new integer columns to the list checked for defaulting
+                if value is None and any(k in key for k in [
+                    '_successful', '_total', '_cards', '_kicks', 'shots_', 'chances', 'fouls',
+                    'corners', 'saves', 'offsides', 'throw_ins', 'entries', 'dispossessed',
+                    'interceptions', 'clearances', 'touches_', 'passes_in_', 'recoveries',
+                    'errors_lead_to', 'big_saves', 'penalty_saves', 'big_chances_scored'
+                ]):
                      stat_tuple.append(0)
+                elif value is None and any(k in key for k in ['percentage', 'expected_', 'prevented', 'rating']): # Added prevented and rating for clarity
+                    # Default float/percentage columns to None if missing
+                     stat_tuple.append(None)
                 else:
                      stat_tuple.append(value)
 
-            # Validate tuple length
-            if len(stat_tuple) == 56:
+            # Validate tuple length against the expected number of columns
+            expected_columns = len(TEAM_STATS_DB_ORDER)
+            if len(stat_tuple) == expected_columns:
                 parsed_stats_batch.append(tuple(stat_tuple))
             else:
-                logging.error(f"Match {match_id}, Period {period_code}, Team {team_id}: Incorrect number of stats in tuple. Expected 56, got {len(stat_tuple)}")
+                # Log the specific keys and values if the count is off for easier debugging
+                logging.error(f"Match {match_id}, Period {period_code}, Team {team_id}: Incorrect number of stats in tuple. Expected {expected_columns}, got {len(stat_tuple)}. Keys in order: {TEAM_STATS_DB_ORDER}")
+
 
     return parsed_stats_batch
 
@@ -342,4 +391,3 @@ async def process_team_stats_for_match(page: Page, match_id: int, home_team_id: 
         db_success = False
 
     return db_success
-

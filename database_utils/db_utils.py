@@ -1,7 +1,7 @@
 # database_utils/db_utils.py
 import asyncpg
 import os
-import re 
+import re
 from dotenv import load_dotenv
 import logging
 from typing import List, Dict, Any, Tuple, Optional, Union
@@ -32,15 +32,15 @@ async def init_db_pool():
             host=DB_HOST,
             port=DB_PORT,
             min_size=1,
-            max_size=5, 
-            command_timeout=50 
+            max_size=5,
+            command_timeout=50
         )
         logging.info("Pool de conexiones asyncpg inicializado.")
         return db_pool
     except (Exception, asyncpg.PostgresError) as error:
         logging.error(f"Error al inicializar el pool de conexiones asyncpg: {error}")
         db_pool = None
-        raise 
+        raise
 
 async def close_db_pool():
     """Cierra el pool de conexiones asyncpg."""
@@ -99,7 +99,7 @@ async def execute_query(sql: str, params: Optional[Tuple] = None, fetch: bool = 
                 # Para INSERT/UPDATE/DELETE, execute devuelve el estado (e.g., 'INSERT 0 1')
                 status = await connection.execute(sql, *params if params else [])
                 logging.debug(f"Ejecutada SQL (execute): {sql[:100]}... con params: {params} -> Status: {status}")
-                return status 
+                return status
 
         except (asyncpg.PostgresError, OSError) as error: # OSError puede ocurrir si la conexión se pierde
             logging.error(f"Error ejecutando SQL: {sql[:100]}... Error: {error}")
@@ -125,7 +125,7 @@ async def execute_many(sql: str, data_list: List[Tuple]):
         return False
     if not data_list:
         logging.warning("execute_many llamado con lista de datos vacía.")
-        return True 
+        return True
 
     count = 0
     def repl(match):
@@ -148,7 +148,7 @@ async def execute_many(sql: str, data_list: List[Tuple]):
                  logging.error(f"Error inesperado ejecutando lote SQL: {sql[:100]}... Error: {type(e).__name__} - {e}")
                  return False
 
-#Funciones específicas de Inserción/Actualización 
+#Funciones específicas de Inserción/Actualización
 
 
 async def upsert_tournament(tournament_id: int, name: str, country: Optional[str]):
@@ -221,6 +221,8 @@ async def insert_player_stats_batch(player_stats_list: List[Tuple]):
     """
     if not player_stats_list: return
 
+    # The column list has been extended with the new player stats (now 51 total stats + 8 prefix = 59 columns)
+    # Ensure the number of placeholders ($N) matches the number of columns (59)
     sql = """
         INSERT INTO player_match_stats (
             match_id, player_id, team_id, is_substitute, played_position, jersey_number,
@@ -231,11 +233,20 @@ async def insert_player_stats_batch(player_stats_list: List[Tuple]):
             dispossessed, duels_won, duels_lost, aerials_won, aerials_lost, ground_duels_won,
             ground_duels_total, tackles, interceptions, clearances, shots_blocked_by_player,
             dribbled_past, fouls_committed, fouls_suffered, saves, punches_made, high_claims,
-            saves_inside_box, sweeper_keeper_successful, sweeper_keeper_total
+            saves_inside_box, sweeper_keeper_successful, sweeper_keeper_total,
+            -- New player stats columns (previous request)
+            goals_prevented, runs_out_successful, penalties_saved, penalty_committed,
+            expected_goals, expected_assists, penalty_won, penalty_miss, big_chances_missed,
+            -- New player stats columns (updated request)
+            errors_leading_to_shot, big_chances_created, errors_leading_to_goal
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
             $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
-            $41, $42, $43, $44, $45, $46, $47
+            $41, $42, $43, $44, $45, $46, $47,
+            -- Placeholders for new player stats columns (previous request, start from $48)
+            $48, $49, $50, $51, $52, $53, $54, $55, $56,
+            -- Placeholders for new player stats columns (updated request, start from $57)
+            $57, $58, $59
         )
         ON CONFLICT (match_id, player_id) DO UPDATE SET
             team_id = EXCLUDED.team_id,
@@ -264,7 +275,21 @@ async def insert_player_stats_batch(player_stats_list: List[Tuple]):
             saves = EXCLUDED.saves, punches_made = EXCLUDED.punches_made, high_claims = EXCLUDED.high_claims,
             saves_inside_box = EXCLUDED.saves_inside_box,
             sweeper_keeper_successful = EXCLUDED.sweeper_keeper_successful,
-            sweeper_keeper_total = EXCLUDED.sweeper_keeper_total;
+            sweeper_keeper_total = EXCLUDED.sweeper_keeper_total,
+            -- Update new player stats columns (previous request)
+            goals_prevented = EXCLUDED.goals_prevented,
+            runs_out_successful = EXCLUDED.runs_out_successful,
+            penalties_saved = EXCLUDED.penalties_saved,
+            penalty_committed = EXCLUDED.penalty_committed,
+            expected_goals = EXCLUDED.expected_goals,
+            expected_assists = EXCLUDED.expected_assists,
+            penalty_won = EXCLUDED.penalty_won,
+            penalty_miss = EXCLUDED.penalty_miss,
+            big_chances_missed = EXCLUDED.big_chances_missed,
+            -- Update new player stats columns (updated request)
+            errors_leading_to_shot = EXCLUDED.errors_leading_to_shot,
+            big_chances_created = EXCLUDED.big_chances_created,
+            errors_leading_to_goal = EXCLUDED.errors_leading_to_goal;
     """
     await execute_many(sql, player_stats_list)
 
@@ -275,6 +300,7 @@ async def insert_team_stats_batch(team_stats_list: List[Tuple]):
     """
     if not team_stats_list: return
 
+    # The column list matches the previous request (66 columns)
     sql = """
         INSERT INTO team_match_stats (
             match_id, team_id, is_home_team, period, formation, average_team_rating,
@@ -289,11 +315,17 @@ async def insert_team_stats_batch(team_stats_list: List[Tuple]):
             duels_won_percentage, dispossessed, ground_duels_successful, ground_duels_total,
             ground_duels_percentage, aerial_duels_successful, aerial_duels_total,
             aerial_duels_percentage, dribbles_successful, dribbles_total, dribbles_percentage,
-            interceptions, clearances, goal_kicks
+            interceptions, clearances, goal_kicks,
+            -- New team stats columns (previous request)
+            expected_goals, touches_in_penalty_area, passes_in_final_third, recoveries,
+            errors_lead_to_shot, goals_prevented, big_saves, errors_lead_to_goal,
+            penalty_saves, big_chances_scored
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
             $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
-            $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56
+            $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56,
+            -- Placeholders for new team stats columns (previous request, start from $57)
+            $57, $58, $59, $60, $61, $62, $63, $64, $65, $66
         )
         ON CONFLICT (match_id, team_id, period) DO UPDATE SET
             formation = EXCLUDED.formation,
@@ -321,7 +353,18 @@ async def insert_team_stats_batch(team_stats_list: List[Tuple]):
             aerial_duels_successful=EXCLUDED.aerial_duels_successful, aerial_duels_total=EXCLUDED.aerial_duels_total,
             aerial_duels_percentage=EXCLUDED.aerial_duels_percentage, dribbles_successful=EXCLUDED.dribbles_successful,
             dribbles_total=EXCLUDED.dribbles_total, dribbles_percentage=EXCLUDED.dribbles_percentage,
-            interceptions=EXCLUDED.interceptions, clearances=EXCLUDED.clearances, goal_kicks=EXCLUDED.goal_kicks;
+            interceptions=EXCLUDED.interceptions, clearances=EXCLUDED.clearances, goal_kicks=EXCLUDED.goal_kicks,
+            -- Update new team stats columns (previous request)
+            expected_goals = EXCLUDED.expected_goals,
+            touches_in_penalty_area = EXCLUDED.touches_in_penalty_area,
+            passes_in_final_third = EXCLUDED.passes_in_final_third,
+            recoveries = EXCLUDED.recoveries,
+            errors_lead_to_shot = EXCLUDED.errors_lead_to_shot,
+            goals_prevented = EXCLUDED.goals_prevented,
+            big_saves = EXCLUDED.big_saves,
+            errors_lead_to_goal = EXCLUDED.errors_lead_to_goal,
+            penalty_saves = EXCLUDED.penalty_saves,
+            big_chances_scored = EXCLUDED.big_chances_scored;
     """
     await execute_many(sql, team_stats_list)
 
@@ -367,5 +410,3 @@ async def get_basic_match_details(match_id: int) -> Optional[Dict[str, Any]]:
             "away_score_ht": result['away_score_ht']
         }
     return None
-
-

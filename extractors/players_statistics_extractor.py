@@ -1,3 +1,4 @@
+#players_statistics_extractor.py
 import asyncio
 import json
 import random
@@ -13,8 +14,8 @@ from helpers.convert_stats import _safe_to_float, _safe_to_int
 
 # Mapping from SofaScore API keys to database column names for player_match_stats
 SOFASCORE_API_TO_DB_STATS_MAP = {
-    # Order MUST match the VALUES clause in insert_player_stats_batch
-    # IDs and basic info (handled separately)
+    # Order MUST match the VALUES clause in insert_player_stats_batch (implicitly via DB_STATS_ORDER)
+    # IDs and basic info (handled separately in the tuple prefix)
     'minutesPlayed': 'minutes_played',
     'touches': 'touches',
     'goals': 'goals',
@@ -36,11 +37,11 @@ SOFASCORE_API_TO_DB_STATS_MAP = {
     'possessionLostCtrl': 'possession_lost',
     'dispossessed': 'dispossessed',
     'duelWon': 'duels_won',
-    'duelLost': 'duels_lost', # Note: DB schema has duels_lost, API might not directly provide it
+    'duelLost': 'duels_lost',
     'aerialWon': 'aerials_won',
-    'aerialLost': 'aerials_lost', # Note: DB schema has aerials_lost, API might not directly provide it
-    'groundDuelWon': 'ground_duels_won', # Note: Needs calculation if not present
-    'totalContest': 'ground_duels_total', # Assuming totalContest maps here, verify API meaning
+    'aerialLost': 'aerials_lost',
+    # 'groundDuelWon': 'ground_duels_won', # Derived
+    'totalContest': 'ground_duels_total', # Assuming totalContest maps here
     'totalTackle': 'tackles',
     'interceptionWon': 'interceptions',
     'totalClearance': 'clearances',
@@ -54,10 +55,24 @@ SOFASCORE_API_TO_DB_STATS_MAP = {
     'savedShotsFromInsideTheBox': 'saves_inside_box',
     'keeperSweeperWon': 'sweeper_keeper_successful',
     'totalKeeperSweeper': 'sweeper_keeper_total',
+    # New player stats from user request (mapping API key guesses to DB keys)
+    'goalsPrevented': 'goals_prevented', # API key guess (can be float)
+    'runsOutSuccessful': 'runs_out_successful', # API key guess (int)
+    'penaltiesSaved': 'penalties_saved', # API key guess (int)
+    'penaltyCommit': 'penalty_committed', # API key guess (int)
+    'expectedGoals': 'expected_goals', # API key guess (xG, float)
+    'expectedAssists': 'expected_assists', # API key guess (xA, float)
+    'penaltyWon': 'penalty_won', # API key guess (int)
+    'penaltyMiss': 'penalty_miss', # API key guess (int)
+    'bigChanceMissed': 'big_chances_missed', # API key guess (int)
+    # New player stats added from the *updated* user list (mapping API key guesses to DB keys)
+    'errorsLeadingToShot': 'errors_leading_to_shot', # API key guess (int)
+    'bigChanceCreated': 'big_chances_created',     # API key guess (int)
+    'errorsLeadingToGoal': 'errors_leading_to_goal' # API key guess (int)
 }
 
 # Ordered list of DB stat keys corresponding to the VALUES clause in insert_player_stats_batch
-# Excludes the first 8 fields which are handled separately.
+# Excludes the first 8 fields which are handled separately (match_id, player_id, etc.).
 DB_STATS_ORDER = [
     'minutes_played', 'touches', 'goals', 'assists', 'own_goals',
     'passes_accurate', 'passes_total', 'passes_key', 'long_balls_accurate', 'long_balls_total',
@@ -67,9 +82,13 @@ DB_STATS_ORDER = [
     'ground_duels_won', 'ground_duels_total', 'tackles', 'interceptions', 'clearances',
     'shots_blocked_by_player', 'dribbled_past', 'fouls_committed', 'fouls_suffered',
     'saves', 'punches_made', 'high_claims', 'saves_inside_box',
-    'sweeper_keeper_successful', 'sweeper_keeper_total'
-] # 39 stats columns
-
+    'sweeper_keeper_successful', 'sweeper_keeper_total',
+    # New player stats DB columns added in the previous request
+    'goals_prevented', 'runs_out_successful', 'penalties_saved', 'penalty_committed',
+    'expected_goals', 'expected_assists', 'penalty_won', 'penalty_miss', 'big_chances_missed',
+    # New player stats DB columns from the *updated* user list
+    'errors_leading_to_shot', 'big_chances_created', 'errors_leading_to_goal'
+] # Total stats columns: 39 (original) + 9 (prev new) + 3 (new) = 51
 
 def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: int) -> Optional[Tuple[Tuple, Tuple]]:
     """
@@ -99,7 +118,7 @@ def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: 
     market_value_eur = _safe_to_int(player_info.get("proposedMarketValueRaw", {}).get("value"))
     sofascore_rating = _safe_to_float(stats_raw.get('rating')) # Rating is in stats
 
-    # Tuple 
+    # Tuple for player data
     player_tuple = (
         player_id,
         player_name,
@@ -109,17 +128,17 @@ def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: 
     )
 
     # --- Prepare stats tuple ---
-    # Start with the fixed fields in correct order
+    # Start with the fixed fields in correct order (8 fields)
     stats_tuple_prefix = [
         match_id,
         player_id,
         team_id,
         is_substitute,
-        played_position, 
+        played_position,
         jersey_number,
         market_value_eur, # Not by timestamp... Mostlikely data leakage if keeped
         sofascore_rating
-    ] 
+    ]
 
     # Extract stats based on the map and order
     extracted_stats = []
@@ -128,34 +147,52 @@ def _process_player_entry(player_entry: Dict[str, Any], match_id: int, team_id: 
     # Calculate derived stats first if needed
     duels_won = _safe_to_int(stats_raw.get('duelWon'))
     aerials_won = _safe_to_int(stats_raw.get('aerialWon'))
+    # Ground duels won might need calculation if not provided directly
     if duels_won is not None and aerials_won is not None:
-        calculated_stats['ground_duels_won'] = duels_won - aerials_won
+         # Check if groundDuelWon exists first, otherwise calculate
+         calculated_stats['ground_duels_won'] = _safe_to_int(stats_raw.get('groundDuelWon')) if stats_raw.get('groundDuelWon') is not None else (duels_won - aerials_won)
     else:
-        calculated_stats['ground_duels_won'] = None 
+        calculated_stats['ground_duels_won'] = _safe_to_int(stats_raw.get('groundDuelWon'))
 
     calculated_stats['duels_lost'] = _safe_to_int(stats_raw.get('duelLost'))
     calculated_stats['aerials_lost'] = _safe_to_int(stats_raw.get('aerialLost'))
+
 
     for db_key in DB_STATS_ORDER:
         found_value = None
         if db_key in calculated_stats:
             found_value = calculated_stats[db_key]
         else:
+            # Find the corresponding API key in the map
             api_key = next((api for api, db in SOFASCORE_API_TO_DB_STATS_MAP.items() if db == db_key), None)
             if api_key and api_key in stats_raw:
                 raw_value = stats_raw[api_key]
-                 
-                found_value = _safe_to_int(raw_value)
 
-        
-        extracted_stats.append(found_value if found_value is not None else 0) 
+                # Use appropriate converter based on expected data type for new stats
+                if db_key in ['expected_goals', 'expected_assists', 'goals_prevented']:
+                     found_value = _safe_to_float(raw_value) # xG, xA, goals_prevented can be floats
+                elif db_key == 'sofascore_rating':
+                     found_value = _safe_to_float(raw_value) # Rating is a float
+                else:
+                    found_value = _safe_to_int(raw_value) # Most other stats are integers (counts)
+
+
+        # Append extracted/calculated value, defaulting to 0 for most counts or None for floats/percentages if not found
+        if found_value is None:
+             if db_key in ['expected_goals', 'expected_assists', 'sofascore_rating', 'goals_prevented']:
+                  extracted_stats.append(None) # Default floats/ratings to None
+             else:
+                  extracted_stats.append(0) # Default integer counts to 0
+        else:
+             extracted_stats.append(found_value)
 
     # Combine prefix and extracted stats
     player_stats_tuple = tuple(stats_tuple_prefix + extracted_stats)
 
-    # Validate length (8 prefix + 39 stats = 47)
-    if len(player_stats_tuple) != 47:
-        logging.error(f"Match {match_id}, Player {player_id}: Incorrect number of stats generated. Expected 47, got {len(player_stats_tuple)}")
+    # Validate length (8 prefix + 51 stats = 59)
+    expected_length = 8 + len(DB_STATS_ORDER) # 8 prefix + 51 stats = 59
+    if len(player_stats_tuple) != expected_length:
+        logging.error(f"Match {match_id}, Player {player_id}: Incorrect number of stats generated. Expected {expected_length}, got {len(player_stats_tuple)}. DB_STATS_ORDER length: {len(DB_STATS_ORDER)}")
         return None
 
     return player_tuple, player_stats_tuple
@@ -226,7 +263,7 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
         error_code = lineup_raw_data.get("error", 500) if isinstance(lineup_raw_data, dict) else 500
         error_msg = lineup_raw_data.get("message", "Fetch failed or returned None") if isinstance(lineup_raw_data, dict) else "Fetch failed"
         logging.error(f"    -> Falló la obtención de alineaciones para {match_id} (Error {error_code}): {error_msg}")
-        return False, None 
+        return False, None
 
     players_to_upsert = []
     player_stats_to_insert = []
@@ -274,6 +311,8 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
         return False, None # Return tuple indicating failure
 
     # If DB operations succeeded, return success status and the extracted aggregate data
+    # Note: These calculations are based on the tuple structure, which hasn't changed its *prefix*,
+    # but the total length of the stats part has increased. Accessing by index 7 (rating) and 6 (value) is fine.
     home_ratings = [p[7] for p in player_stats_to_insert if p[2] == home_team_id and p[7] is not None and p[7] > 0]
     home_values = [p[6] for p in player_stats_to_insert if p[2] == home_team_id and p[6] is not None]
     away_ratings = [p[7] for p in player_stats_to_insert if p[2] == away_team_id and p[7] is not None and p[7] > 0]
@@ -293,4 +332,3 @@ async def process_player_stats_for_match(page: Page, match_id: int, home_team_id
     }
 
     return db_success, aggregate_data
-

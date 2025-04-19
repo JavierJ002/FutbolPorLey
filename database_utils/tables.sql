@@ -182,3 +182,32 @@ CREATE INDEX idx_team_match_stats_team_period ON team_match_stats(team_id, perio
 
 CREATE INDEX idx_players_name ON players(name); 
 SET client_encoding = 'UTF8';
+
+
+
+ALTER TABLE team_match_stats
+ADD COLUMN expected_goals FLOAT NULL,
+ADD COLUMN touches_in_penalty_area INTEGER NULL DEFAULT 0,
+ADD COLUMN passes_in_final_third INTEGER NULL DEFAULT 0,
+ADD COLUMN recoveries INTEGER NULL DEFAULT 0,
+ADD COLUMN errors_lead_to_shot INTEGER NULL DEFAULT 0,
+ADD COLUMN goals_prevented FLOAT NULL,
+ADD COLUMN big_saves INTEGER NULL DEFAULT 0,
+ADD COLUMN errors_lead_to_goal INTEGER NULL DEFAULT 0,
+ADD COLUMN penalty_saves INTEGER NULL DEFAULT 0,
+ADD COLUMN big_chances_scored INTEGER NULL DEFAULT 0;
+
+
+ALTER TABLE player_match_stats
+ADD COLUMN goals_prevented FLOAT NULL,        
+ADD COLUMN runs_out_successful INTEGER NULL DEFAULT 0, 
+ADD COLUMN penalties_saved INTEGER NULL DEFAULT 0,  
+ADD COLUMN penalty_committed INTEGER NULL DEFAULT 0,
+ADD COLUMN expected_goals FLOAT NULL,         
+ADD COLUMN expected_assists FLOAT NULL,       
+ADD COLUMN penalty_won INTEGER NULL DEFAULT 0,      
+ADD COLUMN penalty_miss INTEGER NULL DEFAULT 0,     
+ADD COLUMN big_chances_missed INTEGER NULL DEFAULT 0,
+ADD COLUMN errors_leading_to_shot INTEGER NULL DEFAULT 0,
+ADD COLUMN big_chances_created INTEGER NULL DEFAULT 0,
+ADD COLUMN errors_leading_to_goal INTEGER NULL DEFAULT 0;

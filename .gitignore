@@ -6,3 +6,4 @@ ApiScrapper/
 .env
 *.cfg
 extractors/__pycache__/
+**.sql

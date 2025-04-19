@@ -47,7 +47,7 @@ async def setup_browser_context(p, existing_browser: Optional[Browser] = None) -
 
 
 async def main():
-    NUMERO_DE_RONDAS = 30 # Define how many rounds to process, add condition in case scrapping only last round, when u finish scrapping the 
+    NUMERO_DE_RONDAS = 38 # Define how many rounds to process, add condition in case scrapping only last round, when u finish scrapping the 
                           # games until present
 
     #Database
