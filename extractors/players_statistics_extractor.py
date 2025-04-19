@@ -58,17 +58,17 @@ SOFASCORE_API_TO_DB_STATS_MAP = {
     # New player stats from user request (mapping API key guesses to DB keys)
     'goalsPrevented': 'goals_prevented', # API key guess (can be float)
     'runsOutSuccessful': 'runs_out_successful', # API key guess (int)
-    'penaltiesSaved': 'penalties_saved', # API key guess (int)
-    'penaltyCommit': 'penalty_committed', # API key guess (int)
+    'penaltySave': 'penalties_saved', # API key guess (int)
+    'penaltyConceded': 'penalty_committed', # API key guess (int)
     'expectedGoals': 'expected_goals', # API key guess (xG, float)
     'expectedAssists': 'expected_assists', # API key guess (xA, float)
     'penaltyWon': 'penalty_won', # API key guess (int)
     'penaltyMiss': 'penalty_miss', # API key guess (int)
     'bigChanceMissed': 'big_chances_missed', # API key guess (int)
     # New player stats added from the *updated* user list (mapping API key guesses to DB keys)
-    'errorsLeadingToShot': 'errors_leading_to_shot', # API key guess (int)
+    'errorLeadToAShot': 'errors_leading_to_shot', # API key guess (int)
     'bigChanceCreated': 'big_chances_created',     # API key guess (int)
-    'errorsLeadingToGoal': 'errors_leading_to_goal' # API key guess (int)
+    'errorLeadToAGoal': 'errors_leading_to_goal' # API key guess (int)
 }
 
 # Ordered list of DB stat keys corresponding to the VALUES clause in insert_player_stats_batch

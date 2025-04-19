@@ -36,7 +36,7 @@ STATS_NAME_MAP_API_TO_TEMP = {
     "Offsides": "offsides",
     "Accurate passes": "accurate_passes_percentage_complex", # e.g., "87%" or "455/524 (87%)"
     "Throw-ins": "throw_ins",
-    "Final third entries": "final_third_entries",
+    "Fouled in final third": "final_third_entries",
     "Long balls": "long_balls_complex", # e.g., "30/56 (54%)"
     "Crosses": "crosses_complex", # e.g., "5/18 (28%)"
     "Duels": "duels_won_complex", # e.g., "58/116 (50%)" - Assuming 'Duels' means 'Duels Won'
@@ -49,15 +49,15 @@ STATS_NAME_MAP_API_TO_TEMP = {
     "Clearances": "clearances",
     "Goal kicks": "goal_kicks",
     # Team stats added in the previous request, keeping them here
-    "Expected goals (xG)": "expected_goals_team",
-    "Touches in opposition box": "touches_in_penalty_area",
+    "Expected goals": "expected_goals_team",
+    "Touches in penalty area": "touches_in_penalty_area",
     "Passes into final third": "passes_in_final_third",
     "Recoveries": "recoveries",
-    "Errors leading to shot": "errors_lead_to_shot",
+    "Errors lead to a shot": "errors_lead_to_shot",
     "Goals prevented": "goals_prevented_team", # API name guess
     "Big saves": "big_saves", # API name guess
-    "Errors leading to goal": "errors_lead_to_goal", # API name guess
-    "Penalties saved": "penalty_saves_team", # API name guess (for team stats context)
+    "Errors lead to a goal": "errors_lead_to_goal", # API name guess
+    "Penalty saves": "penalty_saves_team", # API name guess (for team stats context)
     "Big chances scored": "big_chances_scored" # API name guess
 }
 
