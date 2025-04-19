@@ -211,3 +211,5 @@ ADD COLUMN big_chances_missed INTEGER NULL DEFAULT 0,
 ADD COLUMN errors_leading_to_shot INTEGER NULL DEFAULT 0,
 ADD COLUMN big_chances_created INTEGER NULL DEFAULT 0,
 ADD COLUMN errors_leading_to_goal INTEGER NULL DEFAULT 0;
+
+

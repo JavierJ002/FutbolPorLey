@@ -3,6 +3,7 @@ import logging
 import random
 from playwright.async_api import async_playwright, Page, Browser, BrowserContext
 from typing import Optional, Tuple
+from config.driver_setup import _NUMERO_DE_RONDAS
 # Database utilities
 from database_utils.db_utils import (
     init_db_pool, close_db_pool, get_basic_match_details,
@@ -47,8 +48,6 @@ async def setup_browser_context(p, existing_browser: Optional[Browser] = None) -
 
 
 async def main():
-    NUMERO_DE_RONDAS = 38 # Define how many rounds to process, add condition in case scrapping only last round, when u finish scrapping the 
-                          # games until present
 
     #Database
     pool = None
@@ -64,8 +63,8 @@ async def main():
     # --- Phase 1: Get Match IDs and Basic Data ---
     all_match_ids = []
     try:
-        print(f"\n--- Iniciando Fase 1: Obtener IDs y Datos Básicos ({NUMERO_DE_RONDAS} rondas) ---")
-        all_match_ids = await scrape_round_match_ids(NUMERO_DE_RONDAS)
+        print(f"\n--- Iniciando Fase 1: Obtener IDs y Datos Básicos ({_NUMERO_DE_RONDAS} rondas) ---")
+        all_match_ids = await scrape_round_match_ids(_NUMERO_DE_RONDAS)
     except Exception as id_err:
         logging.error(f"Error crítico durante la Fase 1 (Obtención de IDs): {id_err}", exc_info=True)
         # Decide whether to proceed if some IDs were potentially fetched before error
@@ -182,7 +181,7 @@ async def main():
     total_detailed_success = total_processed - total_detailed_failures
 
     print(f"Resumen:")
-    print(f"  - Rondas procesadas para IDs/Datos básicos: {NUMERO_DE_RONDAS}")
+    print(f"  - Rondas procesadas para IDs/Datos básicos: {_NUMERO_DE_RONDAS}")
     print(f"  - Total de partidos encontrados inicialmente: {total_processed}")
     print(f"  - Partidos procesados exitosamente para Stats Detalladas (Equipo y Jugador): {total_detailed_success}")
     print(f"  - Partidos con errores durante procesamiento detallado: {total_detailed_failures}")

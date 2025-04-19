@@ -154,7 +154,7 @@ async def scrape_round_match_ids(num_rounds: int = 38) -> List[int]: # Valor por
 
             print(f"Procesando Ronda {round_num}...")
             api_url = f"https://www.sofascore.com/api/v1/unique-tournament/{_DEFAULT_TOURNAMENT_ID}/season/{_DEFAULT_SEASON_ID}/events/round/{round_num}"
-            round_page_url = f"https://www.sofascore.com/tournament/football/england/premier-league/{_DEFAULT_TOURNAMENT_ID}/season/{_DEFAULT_SEASON_ID}/matches/round/{round_num}"
+            round_page_url = f"https://www.sofascore.com/tournament/football/{_DEFAULT_TOURNAMENT_COUNTRY}/{_DEFAULT_TOURNAMENT_NAME}/{_DEFAULT_TOURNAMENT_ID}/season/{_DEFAULT_SEASON_ID}/matches/round/{round_num}"
             logging.info(f"      API URL: {api_url}")
 
             match_ids_in_round = []
