@@ -1,3 +1,7 @@
 python-dotenv
 playwright
 asyncpg
+ipykernel
+pandas
+numpy
+seaborn
