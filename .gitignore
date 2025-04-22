@@ -7,3 +7,4 @@ ApiScrapper/
 *.cfg
 extractors/__pycache__/
 **.sql
+**.csv
