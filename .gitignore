@@ -8,3 +8,4 @@ ApiScrapper/
 extractors/__pycache__/
 **.sql
 **.csv
+ansible/
