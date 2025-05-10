@@ -6,3 +6,14 @@ pandas
 numpy
 seaborn
 scipy
+scikit-learn
+
+
+df_norm['aerials_duel_ratio'] = df_norm['aerials_won'] / (df_norm['aerials_won'] + df_norm['aerials_lost'])
+df_norm.loc[(df_norm['aerials_won'] + df_norm['aerials_lost']) == 0, 'aerials_duel_ratio'] = 0
+df_norm['passes_ratio'] = df_norm['passes_accurate'] / df_norm['passes_total']
+df_norm.loc[df_norm['passes_total'] == 0, 'passes_ratio'] = 0  
+
+df_norm.loc[df_norm['passes_ratio'] >= 0.8, name_result] += df_norm['passes_accurate'] * 0.1
+df_norm.loc[(df_norm['passes_ratio'] > 0.5) & (df_norm['passes_ratio'] <= 0.8), name_result] += 0  
+df_norm.loc[df_norm['passes_ratio'] <= 0.5, name_result] -= df_norm['passes_accurate'] * 0.1
