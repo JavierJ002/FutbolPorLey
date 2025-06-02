@@ -36,12 +36,11 @@ SOFASCORE_API_TO_DB_STATS_MAP = {
     'dribbleAttempt': 'dribbles_attempts',
     'possessionLostCtrl': 'possession_lost',
     'dispossessed': 'dispossessed',
-    'duelWon': 'duels_won',
-    'duelLost': 'duels_lost',
-    'aerialWon': 'aerials_won',
-    'aerialLost': 'aerials_lost',
-    # 'groundDuelWon': 'ground_duels_won', # Derived
-    'totalContest': 'ground_duels_total', # Assuming totalContest maps here
+    'duelWon': 'duels_won', #SUMA VICTORIAS DUELOS AEREOS + SUELO
+    'duelLost': 'duels_lost', # DERROTAS EN AEREOS Y SUELO
+    'aerialWon': 'aerials_won', #DUELO AEREO GANADO
+    'aerialLost': 'aerials_lost', #DERROTAS AEREO 
+    'totalContest': 'ground_duels_total', #DRIBBLES
     'totalTackle': 'tackles',
     'interceptionWon': 'interceptions',
     'totalClearance': 'clearances',
